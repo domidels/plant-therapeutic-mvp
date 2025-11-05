@@ -1,0 +1,66 @@
+import httpx
+from typing import List, Dict
+from lxml import etree
+from app.core.config import settings
+
+BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+def build_query(condition: str) -> str:
+    cond = condition.strip()
+    terms = [
+        f'("{cond}"[Title/Abstract] OR "{cond}"[MeSH Terms])',
+        '(herb OR herbal OR plant OR botanical OR phytotherapy OR extract OR supplement)',
+        '(randomized OR randomised OR trial OR meta-analysis OR systematic)'
+    ]
+    return " AND ".join(terms)
+
+async def esearch(client: httpx.AsyncClient, query: str, retmax: int = 60) -> List[str]:
+    params = {
+        "db": "pubmed",
+        "retmode": "json",
+        "term": query,
+        "retmax": str(retmax),
+        "sort": "pub+date",
+        "tool": settings.ncbi_tool,
+        "email": settings.ncbi_email,
+    }
+    r = await client.get(f"{BASE}/esearch.fcgi", params=params,
+                         headers={"User-Agent": settings.user_agent.format(email=settings.ncbi_email)})
+    r.raise_for_status()
+    js = r.json()
+    return js.get("esearchresult", {}).get("idlist", [])
+
+async def efetch(client: httpx.AsyncClient, pmids: List[str]) -> List[Dict]:
+    if not pmids:
+        return []
+    params = {
+        "db": "pubmed",
+        "retmode": "xml",
+        "id": ",".join(pmids),
+        "tool": settings.ncbi_tool,
+        "email": settings.ncbi_email,
+    }
+    r = await client.get(f"{BASE}/efetch.fcgi", params=params,
+                         headers={"User-Agent": settings.user_agent.format(email=settings.ncbi_email)})
+    r.raise_for_status()
+    root = etree.fromstring(r.content)
+    out: List[Dict] = []
+    for art in root.xpath(".//PubmedArticle"):
+        def txt(xpath):
+            node = art.xpath(xpath)
+            return node[0].text if node else ""
+        pmid = txt(".//PMID")
+        title = "".join(art.xpath(".//ArticleTitle//text()")) or ""
+        abstract = " ".join(art.xpath(".//Abstract//AbstractText//text()")) or ""
+        journal = txt(".//Journal/Title")
+        year = txt(".//Journal/JournalIssue/PubDate/Year")
+        pubtype = " ".join([t.text for t in art.xpath(".//PublicationTypeList/PublicationType") if t.text]) or ""
+        out.append({"pmid": pmid, "title": title, "abstract": abstract, "journal": journal, "year": year, "pubtype": pubtype})
+    return out
+
+async def search_and_fetch(condition: str) -> List[Dict]:
+    query = build_query(condition)
+    async with httpx.AsyncClient(timeout=30) as client:
+        ids = await esearch(client, query)
+        ids = ids[:50]
+        return await efetch(client, ids)
