@@ -1,0 +1,103 @@
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+.venv/
+.env/
+# --- Editors/IDE ---
+.vscode/
+.idea/
+*.code-workspace
+
+# --- Python build/cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+.build/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Dependency/lock temp (on garde les locks utiles) ---
+pip-wheel-metadata/
+pip-log.txt
+
+# --- Test/coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# --- Linters/type checkers ---
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- Env & secrets ---
+.env
+.env.*
+*.env
+*.secrets*
+secrets.*
+credentials.*
+*.key
+*.pem
+
+# --- Logs ---
+logs/
+*.log
+uvicorn*.log
+gunicorn*.log
+
+# --- RAG / FAISS / model artefacts (à ne pas commit) ---
+*.faiss
+*.index
+*.hnsw
+*.ann
+*.npy
+*.npz
+
+# Gros poids modèles/LLM (Ollama/HF/gguf, etc.)
+*.gguf
+*.bin
+*.pt
+*.pth
+*.safetensors
+
+# --- Data caches temporaires ---
+cache/
+.cache/
+__cache__/
+tmp/
+tmp-*/
+temp/
+data/
+datasets/
+checkpoints/
+outputs/
+artifacts/
+public/  # si tu génères des assets à la volée
+
+# Garde la seed de plantes suivie si elle est dans le repo
+!app/data/
+app/data/*
+!app/data/seed_plants.csv
+
+# --- Docker/local tooling (si utilisés) ---
+*.pid
+*.pid.lock
+
+# --- OS X archives / misc ---
+*.swp
+*.swo
