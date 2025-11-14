@@ -51,17 +51,29 @@ const START_YEAR = 2025;
 const THIS_YEAR = new Date().getFullYear();
 const CONCURRENCY = 1;
 
-// --- Escaping ---
+// --- Escaping / Unescaping helpers ---
 const esc = (s='') => s.replace(/[&<>"']/g, m => ({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[m]));
 
-// --- Bouton IA : handler ---
-async function exploreArticle(pmid){
+// IMPORTANT: unescape HTML entities from data-* before sending to API
+const unesc = (s='') =>
+  s.replace(/&lt;/g,'<')
+   .replace(/&gt;/g,'>')
+   .replace(/&quot;/g,'"')
+   .replace(/&#39;/g,"'")
+   .replace(/&amp;/g,'&');
+
+// --- Bouton IA : handler (non-stream, JSON) ---
+async function exploreArticle(btnEl){
+  const pmid  = btnEl.dataset.pmid;
+  const plant = (btnEl.dataset.plant || "").trim();
+
   const btns = document.querySelectorAll(`button[data-pmid="${pmid}"]`);
   btns.forEach(b => b.disabled = true);
+
   try{
-    const host = btns[0].closest('.pmids');
+    const host = btnEl.closest('.pmids');
     let box = host.querySelector('.ai-box');
     if(!box){
       box = document.createElement('div');
@@ -69,37 +81,36 @@ async function exploreArticle(pmid){
       host.appendChild(box);
     }
     box.innerHTML = `
-      <div class="muted"><strong>AI exploration (streaming)</strong> — info only.</div>
-      <pre id="ai-${pmid}" style="white-space:pre-wrap;margin:0;"></pre>
+      <div class="muted"><strong>AI exploration</strong> — info only.</div>
+      <pre id="ai-${pmid}" style="white-space:pre-wrap;margin:0;">Loading…</pre>
     `;
     const pre = box.querySelector(`#ai-${pmid}`);
 
-    if (!!window.EventSource) {
-      const es = new EventSource(`/api/explore/stream?pmid=${encodeURIComponent(pmid)}`);
-      es.onmessage = (e) => {
-        if (e.data === "[END]") {
-          es.close();
-          btns.forEach(b => b.disabled = false);
-          return;
-        }
-        pre.textContent += e.data;
-      };
-      es.onerror = () => {
-        es.close();
-        pre.textContent += "\n\n(Stream error.)";
-        btns.forEach(b => b.disabled = false);
-      };
-    } else {
-      const r = await fetch(`/api/explore?pmid=${encodeURIComponent(pmid)}`, { cache: 'no-store' });
-      const js = await r.json();
-      pre.textContent += (js.summary || "");
-      btns.forEach(b => b.disabled = false);
-    }
+    const qs = new URLSearchParams({ pmid });
+    if (plant) qs.set('plant', plant);
+
+    const r = await fetch(`/api/explore?${qs.toString()}`, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+
+    const js = await r.json();
+    const summary = (js.summary || "").trim();
+    const refs    = (js.references || []).join('\n');
+
+    pre.textContent =
+      (summary ? summary + "\n\n" : "") +
+      (refs ? "References:\n" + refs : "");
   }catch(e){
     console.error(e);
+    const host = btnEl.closest('.pmids');
+    const box = host.querySelector('.ai-box');
+    const pre = box && box.querySelector(`#ai-${pmid}`);
+    if (pre) pre.textContent = `Error: ${e.message || e}`;
+  }finally{
     btns.forEach(b => b.disabled = false);
   }
 }
+
+
 
 // --- Carte "plante" (avec bouton IA par article) ---
 function renderPlantCard(x){
@@ -109,7 +120,12 @@ function renderPlantCard(x){
         ${esc(String(s.year || '—'))} – ${esc(String(s.title || ''))}
       </a>
       <div class="muted">${esc(String(s.journal || ''))} (PMID: ${esc(String(s.pmid))})</div>
-      <button data-pmid="${esc(String(s.pmid))}" class="ai-btn" onclick="exploreArticle('${esc(String(s.pmid))}')">
+      <button
+        class="ai-btn"
+        data-pmid="${esc(String(s.pmid))}"
+        data-plant="${esc(String(x.plant || ''))}"
+        onclick="exploreArticle(this)"
+      >
         Use AI to explore
       </button>
     </div>

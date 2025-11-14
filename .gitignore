@@ -1,3 +1,4 @@
+app/api/__pycache__/
 # --- OS cruft ---
 .DS_Store
 Thumbs.db
@@ -101,3 +102,4 @@ app/data/*
 # --- OS X archives / misc ---
 *.swp
 *.swo
+*.pyc
