@@ -16,6 +16,7 @@
   <style>
     .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0 1rem; }
     input#cond { flex: 1; padding: .5rem .75rem; font-size: 1rem; }
+    select#fromYear { padding: .5rem .75rem; font-size: .95rem; }
     button { padding: .5rem .9rem; cursor: pointer; }
     .muted { color: #666; font-size: .95rem; }
     .card { border: 1px solid #e3e3e3; padding: .75rem 1rem; border-radius: .5rem; margin:.5rem 0; background:#fff; }
@@ -35,10 +36,15 @@
   <h1>Evidence-based natural plants for your condition</h1>
   <p class="muted">This tool summarizes <em>peer-reviewed</em> research from PubMed. It is <strong>information only</strong> and not medical advice.</p>
 
-  <div class="row">
-    <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, IBS" />
+<div class="row">
+  <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, IBS" />
+
+  <div class="row-actions">
+    <span class="start-label">Start searching from</span>
+    <select id="fromYear"></select>
     <button id="btn">Search</button>
   </div>
+</div>
 
   <div id="out"></div>
 
@@ -47,9 +53,35 @@
   </footer>
 
 <script>
-const START_YEAR = 2025;
+const START_YEAR_DEFAULT = 2025;   // comportement par défaut, comme avant
+let START_YEAR = START_YEAR_DEFAULT;
 const THIS_YEAR = new Date().getFullYear();
+const MIN_YEAR = 1980;
 const CONCURRENCY = 1;
+
+// --- Initialisation de la liste déroulante ---
+function initYearSelect() {
+  const sel = document.getElementById('fromYear');
+  if (!sel) return;
+
+  sel.innerHTML = '';
+
+  // années THIS_YEAR -> 1980
+  for (let y = THIS_YEAR; y >= MIN_YEAR; y--) {
+    const opt = document.createElement('option');
+    opt.value = String(y);
+    opt.textContent = String(y);
+    if (y === START_YEAR_DEFAULT) {
+      opt.selected = true;  // par défaut 2025
+    }
+    sel.appendChild(opt);
+  }
+
+  // sécurité : si 2025 n’est plus dans la plage pour une raison X
+  if (!sel.value) {
+    sel.value = String(THIS_YEAR);
+  }
+}
 
 // --- Escaping / Unescaping helpers ---
 const esc = (s='') => s.replace(/[&<>"']/g, m => ({
@@ -110,8 +142,6 @@ async function exploreArticle(btnEl){
   }
 }
 
-
-
 // --- Carte "plante" (avec bouton IA par article) ---
 function renderPlantCard(x){
   const list = (x.top_studies || []).map(s => `
@@ -137,17 +167,6 @@ function renderPlantCard(x){
   </div>`;
 }
 
-// --- Rendu d'une année ---
-function renderYearBlock(year, plantResultsForYear){
-  const items = plantResultsForYear.map(renderPlantCard).join('');
-  return `
-    <section class="year-block" id="y${year}">
-      <h2>${year}</h2>
-      ${items || '<p class="muted">Aucune étude retenue cette année.</p>'}
-    </section>
-  `;
-}
-
 // --- Handler principal : interrogation année par année ---
 async function runApiByYear(c, out){
   out.innerHTML = `
@@ -158,9 +177,12 @@ async function runApiByYear(c, out){
   const yearsEl = document.getElementById('years');
   const progressEl = document.getElementById('progress');
 
+  // Sécurise START_YEAR (doit être au moins 1980 et au plus THIS_YEAR)
+  const startY = Math.max(MIN_YEAR, Math.min(START_YEAR, THIS_YEAR));
+
   // Pré-créer les conteneurs (du plus récent au plus ancien)
   let html = '';
-  for(let y = THIS_YEAR; y >= START_YEAR; y--){
+  for(let y = THIS_YEAR; y >= startY; y--){
     html += `<section class="year-block" id="y${y}">
                <h2>${y}</h2>
                <p class="muted">Chargement…</p>
@@ -170,7 +192,7 @@ async function runApiByYear(c, out){
 
   // Liste d'années
   const years = [];
-  for(let y = THIS_YEAR; y >= START_YEAR; y--) years.push(y);
+  for(let y = THIS_YEAR; y >= startY; y--) years.push(y);
 
   // Rendu d'une année
   const doYear = async (year) => {
@@ -215,6 +237,20 @@ async function run(){
   const c = document.getElementById('cond').value.trim();
   if(!c) return;
   const out = document.getElementById('out');
+
+  // récupère l'année choisie, sinon garde le comportement d'avant
+  const sel = document.getElementById('fromYear');
+  if (sel && sel.value) {
+    const y = parseInt(sel.value, 10);
+    if (Number.isFinite(y)) {
+      START_YEAR = y;
+    } else {
+      START_YEAR = START_YEAR_DEFAULT;
+    }
+  } else {
+    START_YEAR = START_YEAR_DEFAULT;
+  }
+
   out.innerHTML = 'Loading…';
   try{
     await runApiByYear(c, out);
@@ -223,8 +259,12 @@ async function run(){
     console.error(e);
   }
 }
+
 document.getElementById('btn').addEventListener('click', run);
 document.getElementById('cond').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') run(); });
+
+// on initialise la liste déroulante immédiatement (le script est en bas de la page)
+initYearSelect();
 </script>
 
 </body>
