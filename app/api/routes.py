@@ -30,8 +30,8 @@ def _sanitize_base(s: str) -> str:
     return s.replace("://localhost", "://127.0.0.1")
 
 # IPv4 par défaut si aucune variable d'env n'est fournie
-OLLAMA_BASE = _sanitize_base(os.getenv("OLLAMA_BASE") or "http://127.0.0.1:11435")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "biomistral")
+BASE = _sanitize_base(os.getenv("BASE") or "http://127.0.0.1:11435")
+MODEL = os.getenv("MODEL", "biomistral")
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=10.0)
 # Timeout par défaut pour stream (utilisé dans les fallbacks)
@@ -39,7 +39,7 @@ _STREAM_TIMEOUT = httpx.Timeout(connect=20.0, read=30.0, write=120.0, pool=20.0)
 
 def _probe_v1_support() -> bool:
     try:
-        r = httpx.get(f"{OLLAMA_BASE}/v1/models", timeout=3.0)
+        r = httpx.get(f"{BASE}/v1/models", timeout=3.0)
         return r.status_code < 400
     except Exception:
         return False
@@ -219,13 +219,13 @@ async def _ollama_chat(messages: List[Dict[str, str]],
     try:
 
         payload_legacy = {
-            "model": OLLAMA_MODEL,
+            "model": MODEL,
             "messages": messages,
             "stream": False,
             "options": {"num_ctx": num_ctx, "num_predict": max_tokens, "temperature": temperature, "keep_alive": "100m", "num_thread":  max(1, os.cpu_count() // 2)}
         }
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False) as client:
-            r = await client.post(f"{OLLAMA_BASE}/api/chat", json=payload_legacy)
+            r = await client.post(f"{BASE}/api/chat", json=payload_legacy)
             r.raise_for_status()
             js = r.json()
 
@@ -391,14 +391,14 @@ async def explore(
 
 @router.get("/debug/ollama")
 async def debug_ollama():
-    out = {"base": OLLAMA_BASE, "model": OLLAMA_MODEL, "has_v1": OLLAMA_HAS_V1}
+    out = {"base": BASE, "model": MODEL, "has_v1": OLLAMA_HAS_V1}
     try:
-        r = httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=3.0)
+        r = httpx.get(f"{BASE}/api/tags", timeout=3.0)
         out["/api/tags"] = r.status_code
     except Exception as e:
         out["/api/tags"] = f"error: {e}"
     try:
-        r = httpx.get(f"{OLLAMA_BASE}/v1/models", timeout=3.0)
+        r = httpx.get(f"{BASE}/v1/models", timeout=3.0)
         out["/v1/models"] = r.status_code
     except Exception as e:
         out["/v1/models"] = f"error: {e}"
