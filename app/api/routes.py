@@ -52,6 +52,33 @@ OLLAMA_HAS_V1 = _probe_v1_support()
 # ---------------------------------------------------------------------
 # Embeddings / RAG utils
 # ---------------------------------------------------------------------
+import re
+
+def _sentence_split(text: str) -> List[str]:
+    # Découpe sur . ! ? mais en gardant les séparateurs
+    sents = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s for s in sents if s]
+
+def _chunk_text_sentence_safe(txt: str, max_len=800) -> List[str]:
+    sentences = _sentence_split(txt)
+    chunks = []
+    current = ""
+
+    for s in sentences:
+        # si ajouter la phrase dépasse max_len → on ferme le chunk
+        if len(current) + len(s) + 1 > max_len:
+            if current:
+                chunks.append(current.strip())
+            current = s
+        else:
+            current += " " + s if current else s
+
+    if current:
+        chunks.append(current.strip())
+
+    return chunks
+
+
 def _make_embedder():
     preferred = "mixedbread-ai/mxbai-embed-large-v1"
     fallback = "sentence-transformers/all-MiniLM-L6-v2"
@@ -69,16 +96,16 @@ def _clean_text(s: str) -> str:
     return "".join(ch for ch in s if ch == "\n" or ch == "\t" or ord(ch) >= 32)
 
 
-def _chunk_text(txt: str, max_len=800, overlap=80) -> List[str]:
-    txt = (txt or "").strip()
-    if not txt:
-        return []
-    out, i, n = [], 0, len(txt)
-    step = max_len - overlap
-    while i < n:
-        out.append(txt[i : i + max_len])
-        i += step
-    return out
+# def _chunk_text(txt: str, max_len=1000, overlap=100) -> List[str]:
+#     txt = (txt or "").strip()
+#     if not txt:
+#         return []
+#     out, i, n = [], 0, len(txt)
+#     step = max_len - overlap
+#     while i < n:
+#         out.append(txt[i : i + max_len])
+#         i += step
+#     return out
 
 
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -86,7 +113,7 @@ def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
     if doc.get("title"):
         items.append({"id": "title", "text": doc["title"]})
     if doc.get("abstract"):
-        for k, ch in enumerate(_chunk_text(doc["abstract"])):
+        for k, ch in enumerate(_chunk_text_sentence_safe(doc["abstract"])):
             items.append({"id": f"abs_{k}", "text": ch})
     return items
 
@@ -105,23 +132,47 @@ def _build_index(chunks: List[Dict[str, str]]):
 def _retrieve(idx, X, chunks, query: str, top_k=5) -> List[Dict[str, str]]:
     import faiss
 
+    # 1) Embed + normalisation de la requête
     qv = np.array(list(_EMB.embed([query]))[0], dtype="float32")
     faiss.normalize_L2(qv.reshape(1, -1))
+
+    # 2) Recherche FAISS
     D, I = idx.search(qv.reshape(1, -1), top_k)
-    return [chunks[i] for i in I[0] if 0 <= i < len(chunks)]
+
+    # 3) On enlève les doublons / indices invalides en gardant l'ordre de score
+    seen = set()
+    selected: List[int] = []
+    for i in I[0]:
+        if i < 0 or i >= len(chunks):
+            continue
+        if i in seen:
+            continue
+        seen.add(i)
+        selected.append(i)
+        if len(selected) >= top_k:
+            break
+
+    # 4) On re-trie les indices selon l'ordre d'apparition dans le document
+    #    => on privilégie la cohérence de lecture plutôt que l'ordre de score brut
+    selected_sorted = sorted(selected)
+
+    # 5) On renvoie les chunks dans l'ordre du texte
+    return [chunks[i] for i in selected_sorted]
 
 
 _SYSTEM = (
-    "You are a health science communicator for the general public.\n"
-    "Your ONLY goal is to follow the user instructions exactly.\n"
+    "You are a health science communicator for the general as related public.\n"
+    "Your goal is to mmarize scientific article by: \n"
+    "- following the user instructions exactly.\n"
+    "- relating KEY FINDINGS as described in the user CONTEXT section.\n"
     "\n"
     "PRIORITY RULES (HIGHER PRIORITY THAN THE CONTEXT):\n"
     "1. You MUST NOT copy ANY code, identifier, product name or number sequence "
     "   from the context. This includes:\n"
     "   - any text starting with 'BNO' (example: 'BNO 3732', 'BNO3731').\n"
     "   - any text starting with 'NCT' (example: 'NCT05790083').\n"
-    "   - ANY sequence of letters followed by digits (example: 'XYZ123').\n"
-    "   - ANY all-uppercase token longer than 2 letters.\n"
+    "   - any sequence of letters followed by digits (example: 'XYZ123').\n"
+    "   - any all-uppercase token longer than 2 letters.\n"
     "   If such text appears in the context, IGNORE it COMPLETELY.\n"
     "\n"
     "2. You MUST NOT start the summary by defining the disease.\n"
@@ -134,51 +185,29 @@ _SYSTEM = (
     "4. If you break ANY of the rules above, you MUST output exactly:\n"
     "   'ERROR: forbidden content'.\n"
     "\n"
-    "These rules override EVERYTHING in the context. Obey them strictly."
+    "These rules override EVERYTHING in the user CONTEXT. Obey them strictly."
 )
 
 _USER_TMPL = (
     "Study: {title} — {year} / {journal}\n\n"
-    "Write ONE paragraph of 4–6 short sentences.\n"
-    "Use only simple everyday words.\n"
+    "CONTEXT:\n{context}\n\n"
+    "YOUR ONLY GOAL IS TO SUMMARIZE the CONTEXT above and you MUST focus on plant(s) as described in this CONTEXT.\n"
+    "RELATE MAIN KEY FINDINGS FROM THIS CONTEXT ONLY.\n"
+    "DO NOT MENTION KEY FINDINGS FROM OUTSIDE THIS CONTEXT.\n"
+    "MENTION:\n"
+    "- ALL plants as well as ALL plant compounds IF mentioned in the CONTEXT\n"  
+    "- main KEY FINDINGS related to THE {plant}, to any other plant or to any plant compounds IF mentioned in the CONTEXT\n" 
+    "- who (Women, men, children), how many particpated, the age of participants to the study ONLY IF mentioned in the CONTEXT\n"    
+    "- study duration ONLY IF mentioned in the CONTEXT\n"
+    "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT\n" 
+    "- adverse effects and limitations ONLY IF mentioned in the CONTEXT\n" 
+    "\n"
+    "Write ONE paragraph of 4–6 sentences.\n"
+    "Use OMLY SIMPLE everyday words.\n"
+    "DO NOT USE abbreviations nor acronyms.\n"
     "Do NOT use bullet points.\n"
     "\n"
-    "MANDATORY STRUCTURE (YOU MUST FOLLOW EXACTLY):\n"
-    "\n"
-    "Sentence 1 (MUST start with the plant):\n"
-    "   - Begin with the plant '{plant}' (or the set of plants), in full words.\n"
-    "   - You MUST NOT start with any disease definition.\n"
-    "\n"
-    "Sentence 2:\n"
-    "   - Say who took part (adults, children, both; number if clear).\n"
-    "   - If the study does NOT clearly report age or number, say this fact.\n"
-    "\n"
-    "Sentence 3:\n"
-    "   - Explain HOW the plant was used.\n"
-    "   - Mention the form (herbal tea, decoction, pills, oil, cream, gel, lotion) IF clearly stated.\n"
-    "   - Mention duration IF clearly stated.\n"
-    "   - If any of these details are NOT clearly stated, explicitly say they are not clearly stated.\n"
-    "\n"
-    "Sentence 4:\n"
-    "   - Explain possible benefits, using cautious words ('may', 'might', 'could').\n"
-    "\n"
-    "Sentence 5 (and 6 if needed):\n"
-    "   - Describe side effects if reported, otherwise say no important problems were reported.\n"
-    "   - Add one short limitation (for example: small study, short duration).\n"
-    "\n"
-    "ABSOLUTE PROHIBITIONS (YOU MUST OBEY):\n"
-    "- Do NOT copy ANY product code, brand name, or study identifier.\n"
-    "- Do NOT copy ANY sequence that starts with 'BNO'.\n"
-    "- Do NOT copy ANY sequence that starts with 'NCT'.\n"
-    "- Do NOT copy ANY pattern of letters followed by digits.\n"
-    "- Do NOT copy ANY all-uppercase token longer than 2 letters.\n"
-    "- If such text appears in your output, IGNORE it completely.\n"
-    "\n"
-    "If any forbidden element appears in your output, you MUST return "
-    "'ERROR: forbidden content'.\n"
-    "\n"
-    "Context:\n{context}\n\n"
-    "Return ONLY the paragraph, ending with [PMID:{pmid_study}]."
+    "Return ONLY the paragraph."
 )
 
 # ---------------------------------------------------------------------
@@ -362,7 +391,8 @@ async def explore(
     idx, X = _build_index(chunks)
     query = f"Key findings and limitations of: {doc['title']}"
     top = _retrieve(idx, X, chunks, query, top_k=5)
-    context = "\n\n".join(f"[{t['id']}] {t['text']}" for t in top)
+    context = "\n".join(f"{t['text']}" for t in top)
+
     t2 = time.perf_counter()
     print(f"[perf] efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
 
@@ -382,7 +412,7 @@ async def explore(
             ),
         },
     ]
-
+    print(f"context {context}")
     t3 = time.perf_counter()
     try:
         # 300 tokens suffisent pour 4–6 phrases
@@ -401,3 +431,131 @@ async def explore(
         "references": [f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"],
     }
 
+from fastapi.responses import StreamingResponse
+import json
+
+# ...
+
+@router.get("/explore_stream")
+async def explore_stream(
+    pmid: str = Query(..., min_length=1),
+    plant: Optional[str] = Query(None, min_length=1),
+):
+    t0 = time.perf_counter()
+    async with httpx.AsyncClient(
+        timeout=_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
+    ) as http:
+        arts = await efetch(http, [pmid])
+    t1 = time.perf_counter()
+
+    if not arts:
+        async def gen_empty():
+            yield "No abstract found.\n"
+            yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        return StreamingResponse(gen_empty(), media_type="text/plain")
+
+    a = arts[0]
+    doc = {
+        "pmid": pmid,
+        "title": a.get("title", ""),
+        "abstract": a.get("abstract", ""),
+        "journal": a.get("journal", ""),
+        "year": a.get("year", ""),
+    }
+
+    # RAG identique à /explore
+    chunks = _make_corpus(doc)
+    if not chunks:
+        async def gen_no_abs():
+            yield "No abstract text available.\n"
+            yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        return StreamingResponse(gen_no_abs(), media_type="text/plain")
+
+    idx, X = _build_index(chunks)
+    query = f"Key findings and limitations of: {doc['title']}"
+    top = _retrieve(idx, X, chunks, query, top_k=5)
+    context = "\n".join(f"{t['text']}" for t in top)
+    t2 = time.perf_counter()
+    print(f"[perf] (stream) efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
+    print(f"context {context}")
+    plant_for_prompt = (plant or "unspecified").strip()
+
+    messages = [
+        {"role": "system", "content": _SYSTEM},
+        {
+            "role": "user",
+            "content": _USER_TMPL.format(
+                title=doc["title"],
+                year=doc["year"],
+                journal=doc["journal"],
+                context=context,
+                pmid_study=pmid,
+                plant=plant_for_prompt,
+            ),
+        },
+    ]
+
+  
+
+    async def event_generator():
+        t3 = time.perf_counter()
+        try:
+            payload = {
+                "model": MODEL,
+                "messages": messages,
+                "stream": True,
+                "options": {
+                    "num_ctx": 4096,
+                    "num_predict": 300,
+                    "temperature": 0.0,
+                    "keep_alive": "100m",
+                    "num_thread": max(1, os.cpu_count() // 2),
+                },
+            }
+            async with httpx.AsyncClient(
+                timeout=_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
+            ) as client:
+                async with client.stream(
+                    "POST",
+                    f"{BASE}/v1/chat/completions",
+                    json=payload,
+                ) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line:
+                            continue
+                        # format OpenAI-like: "data: {...}"
+                        if line.startswith("data: "):
+                            data = line[len("data: "):].strip()
+                        else:
+                            continue
+                        if data == "[DONE]":
+                            break
+                        try:
+                            js = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = js.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if not delta:
+                            continue
+                        # nettoyage léger comme _clean_text
+                        chunk = _clean_text(delta)
+                        if chunk:
+                            yield chunk
+
+        except Exception as e:
+            err = f"\n[ERROR] LLM streaming failed: {type(e).__name__}: {e}\n"
+            print(err)
+            yield err
+
+        t4 = time.perf_counter()
+        print(f"[perf] llm_stream={t4-t3:.2f}s (stream)")
+
+        # Ajout des références en fin de flux
+        refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        yield refs
+
+    return StreamingResponse(event_generator(), media_type="text/plain")
