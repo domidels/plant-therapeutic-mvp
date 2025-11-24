@@ -440,3 +440,26 @@ footer{
   background-size: 100% 100% !important;
   background-repeat: no-repeat !important;
 }
+
+.search-banner {
+    background: #ffffff;
+    border: 1px solid #dddddd;
+    border-radius: .5rem;
+    padding: .6rem .9rem;
+    margin: .75rem 0 .5rem;
+    font-size: 1.05rem;          /* typo un peu plus grande */
+    color: #333;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+
+  .search-banner-label {
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    font-size: .8rem;
+    color: #888;
+    margin-right: .35rem;
+  }
+
+  .search-banner strong {
+    font-weight: 600;            /* maladie corrigée bien en gras */
+  }

@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import traceback
 
 import httpx
 import numpy as np
@@ -272,17 +273,230 @@ async def _ollama_chat(
 
         return json.dumps(js, ensure_ascii=False)
 
+_COND_EXPANSION_TTL = 60 * 60  # 1h pour le cache
+_COND_EXPANSION_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
+
+def _cond_cache_get(cond: str) -> Optional[Dict[str, Any]]:
+    key = cond.strip().lower()
+    item = _COND_EXPANSION_CACHE.get(key)
+    if not item:
+        return None
+    ts, payload = item
+    if time.time() - ts > _COND_EXPANSION_TTL:
+        _COND_EXPANSION_CACHE.pop(key, None)
+        return None
+    return payload
+
+
+def _cond_cache_set(cond: str, payload: Dict[str, Any]) -> None:
+    key = cond.strip().lower()
+    _COND_EXPANSION_CACHE[key] = (time.time(), payload)
+
+
+_COND_SYSTEM = (
+    "You are a medical terminology assistant.\n"
+    "Your job is to normalize possibly misspelled or layman disease names and "
+    "suggest precise medical synonyms.\n"
+    "\n"
+    "RULES:\n"
+    "- Always respond in strict JSON, with keys: corrected, synonyms.\n"
+    "- 'corrected' is a single best-standard disease name in English.\n"
+    "- 'synonyms' is a list of alternative names or layman expressions, in "
+    "  English and possibly French if useful.\n"
+    "- Do NOT explain anything. Do NOT add extra keys. JSON only.\n"
+)
+
+_COND_USER_TMPL = (
+    "User condition: {cond}\n\n"
+    "Task:\n"
+    "1) Fix spelling mistakes in the condition name if any.\n"
+    "2) If the condition is vague, choose the most likely concrete disease.\n"
+    "3) Propose several common synonyms and layman names.\n"
+    "\n"
+    "Return ONLY valid JSON:\n"
+    '{{"corrected": "string", "synonyms": ["string1", "string2", ...]}}'
+)
+
+
+
+
+async def _expand_condition_with_llm(cond: str) -> str:
+    """
+    Prend ce que l'utilisateur a tapé (cond) et renvoie une string `query`
+    à utiliser directement dans search_and_fetch.
+
+    Exemple:
+      "vitilico" -> 'Vitiligo'
+      "eccema"  -> 'eczema'
+      "atopic eczema" -> '"atopic eczema" OR "atopic dermatitis"'
+    """
+
+    cond = cond.strip()
+    print(f"[cond-llm] INPUT condition brut (no cache): {repr(cond)}")
+
+    if not cond:
+        print("[cond-llm] condition vide → on renvoie une chaîne vide.")
+        return ""
+
+    # ---------- 0) Correctifs hard-codés pour fautes fréquentes ----------
+    KNOWN_FIXES = {
+        "vitilico": "vitiligo",
+        "eccema": "eczema",
+        "ecema": "eczema",
+        "acnee": "acne",
+    }
+    lower = cond.lower()
+    if lower in KNOWN_FIXES:
+        corrected = KNOWN_FIXES[lower]
+        print(f"[cond-llm] KNOWN_FIX appliqué: {repr(cond)} -> {repr(corrected)}")
+        return corrected  # une seule maladie, pas de OR
+
+    # ---------- 1) Appel LLM en mode texte simple ----------
+    fallback_system = (
+        "You are a medical terminology assistant.\n"
+        "You fix spelling mistakes in condition names and list medical synonyms for the condition.\n"
+        "Answer in plain text with EXACTLY two lines:\n"
+        "CORRECTED: <best condition name>\n"
+        "SYNONYMS: <comma-separated medical synonyms and synonymous disease names>\n"
+        "Do not add anything else."
+    )
+    fallback_user = (
+        f"User condition: {cond}\n\n"
+        "Return exactly:\n"
+        "CORRECTED: ...\n"
+        "SYNONYMS: ..."
+    )
+
+    messages_txt = [
+        {"role": "system", "content": fallback_system},
+        {"role": "user", "content": fallback_user},
+    ]
+
+    print("[cond-llm] Messages envoyés au LLM (TEXT mode):")
+    print(json.dumps(messages_txt, ensure_ascii=False, indent=2))
+
+    corrected = cond
+    synonyms_clean: List[str] = []
+
+    try:
+        raw = await _ollama_chat(
+            messages_txt,
+            max_tokens=256,
+            num_ctx=512,
+            temperature=0.0,
+        )
+        print(f"[cond-llm] RAW réponse LLM (TEXT) avant nettoyage: {repr(raw)}")
+        raw = _clean_text(raw).strip()
+        print(f"[cond-llm] RAW réponse LLM (TEXT) après _clean_text: {repr(raw)}")
+
+        # On cherche les lignes CORRECTED: ... et SYNONYMS: ...
+        for line in raw.splitlines():
+            line_stripped = line.strip()
+            up = line_stripped.upper()
+            if up.startswith("CORRECTED:"):
+                value = line_stripped[len("CORRECTED:"):].strip()
+                if value:
+                    corrected = value
+            elif up.startswith("SYNONYMS:"):
+                value = line_stripped[len("SYNONYMS:"):].strip()
+                if value:
+                    parts = [p.strip() for p in value.split(",") if p.strip()]
+                    for p in parts:
+                        # On ignore '...' ou les trucs trop courts / bruités
+                        if p in ("...", "…"):
+                            continue
+                        if len(p) < 3:
+                            continue
+                        synonyms_clean.append(p)
+
+        print(f"[cond-llm] parsed corrected='{corrected}', synonyms={synonyms_clean}")
+
+    except Exception as e_txt:
+        print("[cond-llm] ERREUR sur le TEXT mode")
+        print(f"Exception: {type(e_txt).__name__}: {e_txt}")
+        traceback.print_exc()
+        # on garde corrected = cond, synonyms=[]
+
+    # ---------- 2) Construction de la query finale ----------
+    terms: List[str] = []
+    if corrected:
+        terms.append(corrected)
+    for s in synonyms_clean:
+        if s.lower() == corrected.lower():
+            continue
+        if any(s.lower() == t.lower() for t in terms):
+            continue
+        terms.append(s)
+
+    print(f"[cond-llm] terms (corrected + synonyms uniques)={terms}")
+
+    if not terms:
+        # On n'a rien récupéré de propre → on renvoie la condition brute
+        query = cond
+    else:
+        if len(terms) == 1:
+            # Une seule maladie → pas besoin de OR
+            query = terms[0]
+        else:
+            # Plusieurs termes, on les quote + OR
+            query = " OR ".join(f'"{t}"' for t in terms)
+
+    print(f"[cond-llm] OUTPUT query finale: {repr(query)}")
+    return query
 
 # ---------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------
+@router.get("/condition_query")
+async def condition_query(
+    condition: str = Query(..., min_length=2),
+):
+    """
+    Appelle seulement le LLM pour corriger la condition et élargir en requête.
+    Ne touche PAS à PubMed.
+    Retourne:
+      {
+        "condition": "<tel que tapé (trim)>",
+        "search_query": "<requête élargie pour PubMed>"
+      }
+    """
+    condition = (condition or "").strip()
+    if not condition:
+        raise HTTPException(status_code=400, detail="Empty condition")
+
+    print("\n========== [/condition_query] ==========")
+    print(f"[cond_api] condition reçue: {repr(condition)}")
+    try:
+        search_query = await _expand_condition_with_llm(condition)
+        if not search_query:
+            search_query = condition
+        print(f"[cond_api] search_query LLM: {repr(search_query)}")
+    except Exception as e:
+        print(f"[cond_api] ERREUR _expand_condition_with_llm: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        search_query = condition
+        print(f"[cond_api] Fallback search_query={repr(search_query)}")
+
+    payload = {
+        "condition": condition,
+        "search_query": search_query,
+    }
+    print(f"[cond_api] Payload final: {payload}")
+    print("========== [/condition_query END] ==========\n")
+    return payload
+
 @router.get("/recommendations")
 async def recommendations(
     condition: str = Query(..., min_length=2),
     from_year: Optional[int] = Query(None, ge=1800, le=3000),
     to_year: Optional[int] = Query(None, ge=1800, le=3000),
+    llm_query: Optional[str] = Query(None),  # <--- nouveau
 ):
+    print("\n========== [/recommendations] ==========")
+    print(f"[reco] condition reçue (brute): {repr(condition)}")
+    print(f"[reco] from_year={from_year}, to_year={to_year}")
+
     condition = condition.strip()
     if not condition:
         raise HTTPException(status_code=400, detail="Empty condition")
@@ -296,36 +510,70 @@ async def recommendations(
     if from_year < 1800 or to_year < 1800:
         raise HTTPException(status_code=400, detail="Year range out of bounds")
 
-    key = (condition.lower(), from_year, to_year)
-    # cached = _cache_get(key)
-    # if cached:
-    #     return cached
+    print(f"[reco] Intervalle final: {from_year}-{to_year}")
 
+    # 1) LLM → query string
+    print(f"[reco] Intervalle final: {from_year}-{to_year}")
+
+    # 1) LLM → query string (ou bien on reçoit déjà la query calculée)
+    try:
+        if llm_query:
+            search_query = (llm_query or "").strip() or condition
+            print(f"[reco] llm_query fourni par le client: {repr(search_query)}")
+        else:
+            search_query = await _expand_condition_with_llm(condition)
+            if not search_query:
+                search_query = condition
+            print(f"[reco] search_query calculée par LLM côté serveur: {repr(search_query)}")
+    except Exception as e:
+        print(f"[reco] ERREUR cond-expansion: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        search_query = condition
+        print(f"[reco] Fallback search_query={repr(search_query)}")
+
+    key = (search_query.lower(), from_year, to_year)
+    print(f"[reco] Cache key principal: {key}")
+
+    # 2) PubMed
     try:
         t0 = time.perf_counter()
-        articles = await search_and_fetch(condition, str(from_year), str(to_year))
+        print(f"[reco] Appel search_and_fetch(query={repr(search_query)}, from={from_year}, to={to_year})")
+        articles = await search_and_fetch(search_query, str(from_year), str(to_year))
         t1 = time.perf_counter()
         print(
             f"[perf] recommendations PubMed={t1-t0:.2f}s "
-            f"(q='{condition}', {from_year}-{to_year})"
+            f"(q={repr(search_query)}, {from_year}-{to_year})"
         )
+        print(f"[reco] Nombre d'articles récupérés: {len(articles)}")
     except Exception as e:
+        print(f"[reco] ERREUR search_and_fetch: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return {
             "condition": condition,
+            "search_query": search_query,
             "results": [],
             "error": f"PubMed upstream error: {type(e).__name__}",
         }
 
+    # 3) le reste (plantes, scores, etc.) inchangé...
     plant_hits: Dict[str, List[Dict]] = defaultdict(list)
     for a in articles:
+        pmid = a.get("pmid", "?")
+        title = a.get("title", "")[:80]
+        print(f"[reco] Analyse article PMID={pmid}, title≈{repr(title)}")
         text = f"{a.get('title','')} {a.get('abstract','')}"
-        for plant in find_plants_in_text(text, PLANTS_DB):
+        plants_found = list(find_plants_in_text(text, PLANTS_DB))
+        print(f"[reco]  → plantes trouvées: {plants_found}")
+        for plant in plants_found:
             plant_hits[plant].append(a)
 
+    print(f"[reco] Nombre de plantes distinctes trouvées: {len(plant_hits)}")
     results = []
     for plant, arts in plant_hits.items():
+        print(f"[reco] Traitement plante='{plant}' avec {len(arts)} articles")
         scored = sorted(arts, key=score_article, reverse=True)
         plant_score = sum(score_article(a) for a in scored[:5])
+        print(f"[reco]  → plant_score (top 5)={plant_score}")
         summary = summarize_for_patients(plant, scored)
         items = [
             {
@@ -346,112 +594,48 @@ async def recommendations(
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    payload = {"condition": condition, "results": results}
-    # _cache_set(key, payload)
+
+    payload = {
+        "condition": condition,       # ce que l'utilisateur a tapé
+        "search_query": search_query, # query réelle utilisée pour PubMed
+        "results": results,
+    }
+    print(f"[reco] Payload final (résumé): condition={payload['condition']}, "
+          f"search_query={payload['search_query']}, "
+          f"#results={len(payload['results'])}")
+    print("========== [/recommendations END] ==========\n")
     return payload
 
 
-@router.get("/explore")
-async def explore(
-    pmid: str = Query(..., min_length=1),
-    plant: Optional[str] = Query(None, min_length=1),
-):
-    t0 = time.perf_counter()
-    async with httpx.AsyncClient(
-        timeout=60, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
-    ) as http:
-        arts = await efetch(http, [pmid])
-    t1 = time.perf_counter()
-
-    if not arts:
-        return {
-            "pmid": pmid,
-            "summary": "",
-            "references": [],
-        }
-
-    a = arts[0]
-    doc = {
-        "pmid": pmid,
-        "title": a.get("title", ""),
-        "abstract": a.get("abstract", ""),
-        "journal": a.get("journal", ""),
-        "year": a.get("year", ""),
-    }
-
-    # RAG
-    chunks = _make_corpus(doc)
-    if not chunks:
-        return {
-            "pmid": pmid,
-            "summary": "",
-            "references": [f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"],
-        }
-
-    idx, X = _build_index(chunks)
-    query = f"Key findings and limitations of: {doc['title']}"
-    top = _retrieve(idx, X, chunks, query, top_k=5)
-    context = "\n".join(f"{t['text']}" for t in top)
-
-    t2 = time.perf_counter()
-    print(f"[perf] efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
-
-    plant_for_prompt = (plant or "unspecified").strip()
-
-    messages = [
-        {"role": "system", "content": _SYSTEM},
-        {
-            "role": "user",
-            "content": _USER_TMPL.format(
-                title=doc["title"],
-                year=doc["year"],
-                journal=doc["journal"],
-                context=context,
-                pmid_study=pmid,
-                plant=plant_for_prompt,
-            ),
-        },
-    ]
-    print(f"context {context}")
-    t3 = time.perf_counter()
-    try:
-        # 300 tokens suffisent pour 4–6 phrases
-        raw = await _ollama_chat(messages, max_tokens=300, num_ctx=4096, temperature=0)
-    except Exception as e:
-        print(f"[llm fatal] {type(e).__name__}: {e}")
-        raw = f"[ERROR] LLM call failed: {type(e).__name__}: {e}"
-    t4 = time.perf_counter()
-    print(f"[perf] llm={t4-t3:.2f}s (non-stream)")
-
-    summary = _clean_text(raw).strip()
-
-    return {
-        "pmid": pmid,
-        "summary": summary,
-        "references": [f"PubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"],
-    }
 
 from fastapi.responses import StreamingResponse
 import json
 
-# ...
+# # ...
 
 @router.get("/explore_stream")
 async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
 ):
+    print("\n========== [/explore_stream] ==========")
+    print(f"[explore_stream] pmid reçu: {repr(pmid)}, plant={repr(plant)}")
+
     t0 = time.perf_counter()
     async with httpx.AsyncClient(
         timeout=_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
     ) as http:
+        print(f"[explore_stream] Appel efetch pour PMID={pmid}")
         arts = await efetch(http, [pmid])
     t1 = time.perf_counter()
+    print(f"[explore_stream] efetch terminé, durée={t1-t0:.2f}s, nb_arts={len(arts)}")
 
     if not arts:
+        print(f"[explore_stream] Aucun article trouvé pour PMID={pmid}")
         async def gen_empty():
             yield "No abstract found.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        print("========== [/explore_stream END] (no arts) ==========\n")
         return StreamingResponse(gen_empty(), media_type="text/plain")
 
     a = arts[0]
@@ -462,23 +646,34 @@ async def explore_stream(
         "journal": a.get("journal", ""),
         "year": a.get("year", ""),
     }
+    print(f"[explore_stream] Doc récupéré pour PMID={pmid}: "
+          f"title={repr(doc['title'][:80])}, year={doc['year']}, journal={repr(doc['journal'])}")
 
     # RAG identique à /explore
     chunks = _make_corpus(doc)
+    print(f"[explore_stream] Nb de chunks dans le corpus: {len(chunks)}")
     if not chunks:
+        print("[explore_stream] Aucun chunk (pas de titre/abstract exploitable)")
         async def gen_no_abs():
             yield "No abstract text available.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        print("========== [/explore_stream END] (no chunks) ==========\n")
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
     idx, X = _build_index(chunks)
     query = f"Key findings and limitations of: {doc['title']}"
+    print(f"[explore_stream] RAG query: {repr(query)}")
     top = _retrieve(idx, X, chunks, query, top_k=5)
+    print(f"[explore_stream] Nb de chunks top-k pour contexte: {len(top)}")
+
     context = "\n".join(f"{t['text']}" for t in top)
     t2 = time.perf_counter()
     print(f"[perf] (stream) efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
-    print(f"context {context}")
+    print(f"[explore_stream] Longueur contexte (caractères): {len(context)}")
+    print(f"[explore_stream] Extrait contexte (200 premiers caractères): "
+          f"{repr(context[:200])}")
     plant_for_prompt = (plant or "unspecified").strip()
+    print(f"[explore_stream] plant_for_prompt={repr(plant_for_prompt)}")
 
     messages = [
         {"role": "system", "content": _SYSTEM},
@@ -494,11 +689,12 @@ async def explore_stream(
             ),
         },
     ]
-
-  
+    print("[explore_stream] Messages envoyés au LLM (non-stream, structure):")
+    print(json.dumps(messages, ensure_ascii=False, indent=2)[:2000])  # pour éviter de tout spammer
 
     async def event_generator():
         t3 = time.perf_counter()
+        print("[explore_stream] event_generator démarré")
         try:
             payload = {
                 "model": MODEL,
@@ -512,31 +708,47 @@ async def explore_stream(
                     "num_thread": max(1, os.cpu_count() // 2),
                 },
             }
+            print("[explore_stream] Payload envoyé à /v1/chat/completions (stream):")
+            print(json.dumps(payload, ensure_ascii=False, indent=2)[:2000])
+
             async with httpx.AsyncClient(
                 timeout=_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
             ) as client:
+                print(f"[explore_stream] Connexion streaming vers {BASE}/v1/chat/completions")
                 async with client.stream(
                     "POST",
                     f"{BASE}/v1/chat/completions",
                     json=payload,
                 ) as r:
+                    print(f"[explore_stream] Status LLM streaming HTTP: {r.status_code}")
                     r.raise_for_status()
+                    line_count = 0
+                    token_count = 0
                     async for line in r.aiter_lines():
+                        line_count += 1
                         if not line:
                             continue
+                        # log brut des premières lignes
+                        if line_count <= 10:
+                            print(f"[explore_stream] Ligne brute #{line_count}: {repr(line)}")
+
                         # format OpenAI-like: "data: {...}"
                         if line.startswith("data: "):
                             data = line[len("data: "):].strip()
                         else:
                             continue
                         if data == "[DONE]":
+                            print("[explore_stream] Reçu [DONE] du LLM")
                             break
                         try:
                             js = json.loads(data)
-                        except json.JSONDecodeError:
+                        except json.JSONDecodeError as e:
+                            print(f"[explore_stream] JSONDecodeError sur chunk streaming: {e}")
+                            print(f"[explore_stream]   data brut: {repr(data)[:200]}")
                             continue
                         choices = js.get("choices") or []
                         if not choices:
+                            print("[explore_stream] Chunk sans choices, ignoré")
                             continue
                         delta = (choices[0].get("delta") or {}).get("content")
                         if not delta:
@@ -544,18 +756,24 @@ async def explore_stream(
                         # nettoyage léger comme _clean_text
                         chunk = _clean_text(delta)
                         if chunk:
+                            token_count += 1
+                            if token_count <= 10:
+                                print(f"[explore_stream] Chunk texte #{token_count}: {repr(chunk)}")
                             yield chunk
 
         except Exception as e:
             err = f"\n[ERROR] LLM streaming failed: {type(e).__name__}: {e}\n"
             print(err)
+            traceback.print_exc()
             yield err
 
         t4 = time.perf_counter()
         print(f"[perf] llm_stream={t4-t3:.2f}s (stream)")
+        print("[explore_stream] Fin du stream, ajout des références.")
 
         # Ajout des références en fin de flux
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
+        print("========== [/explore_stream END] ==========\n")
 
     return StreamingResponse(event_generator(), media_type="text/plain")

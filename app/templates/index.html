@@ -171,16 +171,11 @@ function renderPlantCard(x){
 }
 
 // --- Handler principal : interrogation année par année ---
-async function runApiByYear(c, out){
-  out.innerHTML = `
-    <div class="muted">Chargement année par année…</div>
-    <div id="progress" class="muted" style="margin-top:.5rem"></div>
-    <div id="years"></div>
-  `;
+async function runApiByYear(condition, llmQuery, out){
   const yearsEl = document.getElementById('years');
   const progressEl = document.getElementById('progress');
 
-  // Sécurise START_YEAR (doit être au moins 1980 et au plus THIS_YEAR)
+  // Sécurise START_YEAR
   const startY = Math.max(MIN_YEAR, Math.min(START_YEAR, THIS_YEAR));
 
   // Pré-créer les conteneurs (du plus récent au plus ancien)
@@ -188,7 +183,7 @@ async function runApiByYear(c, out){
   for(let y = THIS_YEAR; y >= startY; y--){
     html += `<section class="year-block" id="y${y}">
                <h2>${y}</h2>
-               <p class="muted">Chargement…</p>
+               <p class="muted">Loading…</p>
              </section>`;
   }
   yearsEl.innerHTML = html;
@@ -202,21 +197,32 @@ async function runApiByYear(c, out){
     const sec = document.getElementById(`y${year}`);
     try{
       const v = Date.now(); // anti-cache
-      const url = `/api/recommendations?condition=${encodeURIComponent(c)}&from_year=${year}&to_year=${year}&_v=${v}`;
+      const params = new URLSearchParams({
+        condition: condition,
+        from_year: String(year),
+        to_year: String(year),
+        _v: String(v),
+      });
+      if (llmQuery) {
+        // On passe la requête LLM directement → le backend ne refait pas tourner le LLM
+        params.set("llm_query", llmQuery);
+      }
+      const url = `/api/recommendations?${params.toString()}`;
       const r = await fetch(url, { cache: 'no-store' });
       if(!r.ok) throw new Error(`HTTP ${r.status}`);
       const js = await r.json();
+
       const results = js.results || [];
       const itemsHtml = results.map(renderPlantCard).join('');
       sec.innerHTML = `
         <h2>${year}</h2>
-        ${itemsHtml || '<p class="muted">Aucune étude retenue cette année.</p>'}
+        ${itemsHtml || '<p class="muted">No eligible study for this year.</p>'}
       `;
-      progressEl.textContent = `Année rendue : ${year}`;
+      progressEl.textContent = `Rendered year: ${year}`;
       console.log('Rendered year', year, 'count=', results.length);
     }catch(e){
       console.error('Year', year, e);
-      sec.innerHTML = `<h2>${year}</h2><p class="muted">Erreur de chargement.</p>`;
+      sec.innerHTML = `<h2>${year}</h2><p class="muted">Error while loading.</p>`;
     }
   };
 
@@ -232,13 +238,16 @@ async function runApiByYear(c, out){
     }
   }
   await Promise.allSettled([...Array(CONCURRENCY)].map(() => worker()));
-  progressEl.textContent = 'Terminé.';
+  progressEl.textContent = 'Done.';
 }
+
+
+
 
 // Bouton + touche Entrée
 async function run(){
-  const c = document.getElementById('cond').value.trim();
-  if(!c) return;
+  const rawCond = document.getElementById('cond').value.trim();
+  if(!rawCond) return;
   const out = document.getElementById('out');
 
   // récupère l'année choisie, sinon garde le comportement d'avant
@@ -254,14 +263,74 @@ async function run(){
     START_YEAR = START_YEAR_DEFAULT;
   }
 
-  out.innerHTML = 'Loading…';
+  // Prépare le squelette: bandeau + progress + années vides
+  out.innerHTML = `
+  <div id="searchInfo" class="search-banner muted">Thinking about your condition…</div>
+  <div id="progress" class="muted" style="margin-top:.5rem"></div>
+  <div id="years"></div>
+`;
+
+  const searchInfoEl = document.getElementById('searchInfo');
+
+  // 1) On appelle d'abord le LLM (condition_query), sans PubMed
+  let condition = rawCond;
+  let llmQuery  = rawCond;
+
+  try {
+    const v = Date.now();
+    const url = `/api/condition_query?condition=${encodeURIComponent(rawCond)}&_v=${v}`;
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const js = await r.json();
+    condition = (js.condition || rawCond).trim();
+    llmQuery  = (js.search_query || rawCond).trim();
+    console.log("[UI] condition_query retour:", js);
+  } catch(e) {
+    console.error("[UI] Erreur condition_query:", e);
+    // on garde rawCond comme fallback
+    condition = rawCond;
+    llmQuery  = rawCond;
+  }
+
+  // 2) Dès que le LLM a fini → on met à jour le bandeau "Searching for: ..."
+  let terms = [];
+  if (llmQuery) {
+    const parts = llmQuery.split(/\s+OR\s+/i);
+    terms = parts.map(s => {
+      const m = s.match(/^"(.*)"$/);
+      const t = m ? m[1] : s;
+      return t.trim();
+    }).filter(Boolean);
+  }
+
+  let msg = "";
+  if (terms.length === 0) {
+    msg = `Searching for: ${llmQuery || condition}`;
+  } else if (terms.length === 1) {
+    msg = `Searching for: ${terms[0]}`;
+  } else {
+    msg = `Searching for: ${terms.join(", ")}`;
+  }
+
+  if (condition && terms[0] && condition.toLowerCase() !== terms[0].toLowerCase()) {
+    msg += ` (expanded from “${condition}”)`;
+  }
+
+  if (searchInfoEl) {
+    searchInfoEl.textContent = msg;   // <– pas de HTML, juste du texte
+  }
+  console.log("[UI] searchInfo:", msg);
+
+  // 3) Maintenant seulement on lance PubMed année par année, en passant la query LLM
   try{
-    await runApiByYear(c, out);
+    await runApiByYear(condition, llmQuery, out);
   }catch(e){
-    out.innerHTML = 'Error fetching results.';
     console.error(e);
+    const progressEl = document.getElementById('progress');
+    if (progressEl) progressEl.textContent = "Error fetching results.";
   }
 }
+
 
 document.getElementById('btn').addEventListener('click', run);
 document.getElementById('cond').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') run(); });
