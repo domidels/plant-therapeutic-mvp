@@ -15,7 +15,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from fastembed import TextEmbedding
-
+from app.services.medline import get_medlineplus_fullsummary
 from app.services.pubmed import efetch, search_and_fetch
 from app.services.plants import load_plants, find_plants_in_text
 from app.services.ranking import score_article, summarize_for_patients
@@ -97,17 +97,6 @@ def _clean_text(s: str) -> str:
     return "".join(ch for ch in s if ch == "\n" or ch == "\t" or ord(ch) >= 32)
 
 
-# def _chunk_text(txt: str, max_len=1000, overlap=100) -> List[str]:
-#     txt = (txt or "").strip()
-#     if not txt:
-#         return []
-#     out, i, n = [], 0, len(txt)
-#     step = max_len - overlap
-#     while i < n:
-#         out.append(txt[i : i + max_len])
-#         i += step
-#     return out
-
 
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
@@ -163,7 +152,7 @@ def _retrieve(idx, X, chunks, query: str, top_k=5) -> List[Dict[str, str]]:
 
 _SYSTEM = (
     "You are a health science communicator for the general as related public.\n"
-    "Your goal is to mmarize scientific article by: \n"
+    "Your goal is to provide information from a scientific article by: \n"
     "- following the user instructions exactly.\n"
     "- relating KEY FINDINGS as described in the user CONTEXT section.\n"
     "\n"
@@ -176,15 +165,8 @@ _SYSTEM = (
     "   - any all-uppercase token longer than 2 letters.\n"
     "   If such text appears in the context, IGNORE it COMPLETELY.\n"
     "\n"
-    "2. You MUST NOT start the summary by defining the disease.\n"
-    "   The first sentence MUST begin with the plant name(s). If you do not start "
-    "   with the plant name(s), your answer is automatically wrong.\n"
-    "\n"
-    "3. You MUST produce ONLY simple everyday words.\n"
+    "2. You MUST produce ONLY simple everyday words.\n"
     "   No jargon, no abbreviations, no acronyms, no codes.\n"
-    "\n"
-    "4. If you break ANY of the rules above, you MUST output exactly:\n"
-    "   'ERROR: forbidden content'.\n"
     "\n"
     "These rules override EVERYTHING in the user CONTEXT. Obey them strictly."
 )
@@ -192,24 +174,22 @@ _SYSTEM = (
 _USER_TMPL = (
     "Study: {title} — {year} / {journal}\n\n"
     "CONTEXT:\n{context}\n\n"
-    "YOUR ONLY GOAL IS TO SUMMARIZE the CONTEXT above and you MUST focus on plant(s) as described in this CONTEXT.\n"
-    "RELATE MAIN KEY FINDINGS FROM THIS CONTEXT ONLY.\n"
-    "DO NOT MENTION KEY FINDINGS FROM OUTSIDE THIS CONTEXT.\n"
-    "MENTION:\n"
-    "- ALL plants as well as ALL plant compounds IF mentioned in the CONTEXT\n"  
-    "- main KEY FINDINGS related to THE {plant}, to any other plant or to any plant compounds IF mentioned in the CONTEXT\n" 
-    "- who (Women, men, children), how many particpated, the age of participants to the study ONLY IF mentioned in the CONTEXT\n"    
-    "- study duration ONLY IF mentioned in the CONTEXT\n"
-    "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT\n" 
-    "- adverse effects and limitations ONLY IF mentioned in the CONTEXT\n" 
+    "YOUR ONLY GOAL IS TO RELATE MAIN KEY FINDINGS FROM THIS CONTEXT AND THIS CONTEXT ONLY.\n"
+    "PROVIDE SIMPLE INFORMATION AS PER THE FOLLOWING INSTRUCTIONS:\n"
+    "- main KEY FINDINGS related to {plant} (one or several plants) and any plant compound IF mentioned in the CONTEXT.\n"
+    "- who (Women, men, children), how many particpated, the age of participants to the study ONLY IF mentioned in the CONTEXT.\n"
+    "- study duration ONLY IF mentioned in the CONTEXT.\n"
+    "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT.\n"
+    "- adverse effects and limitations ONLY IF mentioned in the CONTEXT.\n"
     "\n"
     "Write ONE paragraph of 4–6 sentences.\n"
-    "Use OMLY SIMPLE everyday words.\n"
-    "DO NOT USE abbreviations nor acronyms.\n"
+    "Use ONLY SIMPLE everyday words.\n"
+    "DO NOT USE abbreviations, acronyms, or codes.\n"
     "Do NOT use bullet points.\n"
     "\n"
     "Return ONLY the paragraph."
 )
+
 
 # ---------------------------------------------------------------------
 # Plants DB + caches
@@ -251,27 +231,38 @@ async def _ollama_chat(
     num_ctx: int = 516,  # ignoré par llama-server, mais gardé pour compat
     temperature: float = 0.2,
 ) -> str:
-        payload_legacy = {
+    payload_legacy = {
         "model": MODEL,
         "messages": messages,
         "stream": False,
-        "options": {"num_ctx": num_ctx, "num_predict": max_tokens, "temperature": temperature, "keep_alive": "100m", "num_thread":  max(1, os.cpu_count() // 2)}
+        "options": {
+            "num_ctx": num_ctx,
+            "num_predict": max_tokens,
+            "temperature": temperature,
+            "keep_alive": "100m",
+            "num_thread": max(1, os.cpu_count() // 2),
+        },
     }
-        async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False) as client:
-            r = await client.post(f"{BASE}/v1/chat/completions", json=payload_legacy)
-            r.raise_for_status()
-            js = r.json()
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT,
+        limits=_LIMITS,
+        transport=_TRANSPORT,
+        trust_env=False,
+    ) as client:
+        r = await client.post(f"{BASE}/v1/chat/completions", json=payload_legacy)
+        r.raise_for_status()
+        js = r.json()
 
-            # 2) format OpenAI /v1/chat/completions :
-            choices = js.get("choices") if isinstance(js, dict) else None
-            if isinstance(choices, list) and choices:
-                first = choices[0] or {}
-                msg = first.get("message") or {}
-                content = msg.get("content")
-                if content:
-                    return content
+        # format OpenAI /v1/chat/completions :
+        choices = js.get("choices") if isinstance(js, dict) else None
+        if isinstance(choices, list) and choices:
+            first = choices[0] or {}
+            msg = first.get("message") or {}
+            content = msg.get("content")
+            if content:
+                return content
 
-        return json.dumps(js, ensure_ascii=False)
+    return json.dumps(js, ensure_ascii=False)
 
 _COND_EXPANSION_TTL = 60 * 60  # 1h pour le cache
 _COND_EXPANSION_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -294,78 +285,52 @@ def _cond_cache_set(cond: str, payload: Dict[str, Any]) -> None:
     _COND_EXPANSION_CACHE[key] = (time.time(), payload)
 
 
-_COND_SYSTEM = (
-    "You are a medical terminology assistant.\n"
-    "Your job is to normalize possibly misspelled or layman disease names and "
-    "suggest precise medical synonyms.\n"
-    "\n"
-    "RULES:\n"
-    "- Always respond in strict JSON, with keys: corrected, synonyms.\n"
-    "- 'corrected' is a single best-standard disease name in English.\n"
-    "- 'synonyms' is a list of alternative names or layman expressions, in "
-    "  English and possibly French if useful.\n"
-    "- Do NOT explain anything. Do NOT add extra keys. JSON only.\n"
-)
-
-_COND_USER_TMPL = (
-    "User condition: {cond}\n\n"
-    "Task:\n"
-    "1) Fix spelling mistakes in the condition name if any.\n"
-    "2) If the condition is vague, choose the most likely concrete disease.\n"
-    "3) Propose several common synonyms and layman names.\n"
-    "\n"
-    "Return ONLY valid JSON:\n"
-    '{{"corrected": "string", "synonyms": ["string1", "string2", ...]}}'
-)
-
-
-
-
-async def _expand_condition_with_llm(cond: str) -> str:
+# ---------------------------------------------------------------------
+# Condition expansion (LLM) + MedlinePlus integration
+# ---------------------------------------------------------------------
+async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
     """
-    Prend ce que l'utilisateur a tapé (cond) et renvoie une string `query`
-    à utiliser directement dans search_and_fetch.
-
-    Exemple:
-      "vitilico" -> 'Vitiligo'
-      "eccema"  -> 'eczema'
-      "atopic eczema" -> '"atopic eczema" OR "atopic dermatitis"'
+    Prend ce que l'utilisateur a tapé (cond) et renvoie un dict:
+      {
+        "corrected": "<nom corrigé pour la maladie>",
+        "search_query": "<requête élargie pour PubMed>",
+        "synonyms": ["..."]
+      }
     """
-
-    cond = cond.strip()
-    print(f"[cond-llm] INPUT condition brut (no cache): {repr(cond)}")
+    cond = (cond or "").strip()
+    print(f"[cond-llm] INPUT condition brut: {repr(cond)}")
 
     if not cond:
-        print("[cond-llm] condition vide → on renvoie une chaîne vide.")
-        return ""
+        print("[cond-llm] condition vide → on renvoie un payload vide.")
+        payload = {"corrected": "", "search_query": "", "synonyms": []}
+        _cond_cache_set(cond, payload)
+        return payload
 
-    # ---------- 0) Correctifs hard-codés pour fautes fréquentes ----------
-    KNOWN_FIXES = {
-        "vitilico": "vitiligo",
-        "eccema": "eczema",
-        "ecema": "eczema",
-        "acnee": "acne",
-    }
-    lower = cond.lower()
-    if lower in KNOWN_FIXES:
-        corrected = KNOWN_FIXES[lower]
-        print(f"[cond-llm] KNOWN_FIX appliqué: {repr(cond)} -> {repr(corrected)}")
-        return corrected  # une seule maladie, pas de OR
+    # cache éventuel
+    cached = _cond_cache_get(cond)
+    if cached:
+        print(f"[cond-llm] Cache hit pour {repr(cond)}: {cached}")
+        return cached
 
-    # ---------- 1) Appel LLM en mode texte simple ----------
+    # ---------- LLM en mode texte simple ----------
     fallback_system = (
         "You are a medical terminology assistant.\n"
-        "You fix spelling mistakes in condition names and list medical synonyms for the condition.\n"
-        "Answer in plain text with EXACTLY two lines:\n"
-        "CORRECTED: <best condition name>\n"
-        "SYNONYMS: <comma-separated medical synonyms and synonymous disease names>\n"
-        "Do not add anything else."
+        "Your ONLY job is to correct spelling mistakes in a disease or condition name.\n"
+        "\n"
+        "You MUST ALWAYS answer with EXACTLY ONE LINE in this format:\n"
+        "CORRECTED: <best standard condition name in English>\n"
+        "\n"
+        "RULES:\n"
+        "- The line MUST start with 'CORRECTED: '.\n"
+        "- Do NOT add any other text.\n"
+        "- Do NOT add explanations.\n"
+        "- Do NOT add other lines.\n"
     )
+
     fallback_user = (
         f"User condition: {cond}\n\n"
-        "Return exactly:\n"
-        "CORRECTED: ...\n"
-        "SYNONYMS: ..."
+        "Correct spelling mistakes in the User condition and RETURN EXACTLY ONE LINE:\n"
+        "CORRECTED: <best condition name>"
     )
 
     messages_txt = [
@@ -390,7 +355,6 @@ async def _expand_condition_with_llm(cond: str) -> str:
         raw = _clean_text(raw).strip()
         print(f"[cond-llm] RAW réponse LLM (TEXT) après _clean_text: {repr(raw)}")
 
-        # On cherche les lignes CORRECTED: ... et SYNONYMS: ...
         for line in raw.splitlines():
             line_stripped = line.strip()
             up = line_stripped.upper()
@@ -398,17 +362,6 @@ async def _expand_condition_with_llm(cond: str) -> str:
                 value = line_stripped[len("CORRECTED:"):].strip()
                 if value:
                     corrected = value
-            elif up.startswith("SYNONYMS:"):
-                value = line_stripped[len("SYNONYMS:"):].strip()
-                if value:
-                    parts = [p.strip() for p in value.split(",") if p.strip()]
-                    for p in parts:
-                        # On ignore '...' ou les trucs trop courts / bruités
-                        if p in ("...", "…"):
-                            continue
-                        if len(p) < 3:
-                            continue
-                        synonyms_clean.append(p)
 
         print(f"[cond-llm] parsed corrected='{corrected}', synonyms={synonyms_clean}")
 
@@ -418,32 +371,46 @@ async def _expand_condition_with_llm(cond: str) -> str:
         traceback.print_exc()
         # on garde corrected = cond, synonyms=[]
 
-    # ---------- 2) Construction de la query finale ----------
+    # ---------- Construction de la query finale ----------
+    MAX_SYNONYMS = 3
+
+    cleaned_synonyms: List[str] = []
+    for s in synonyms_clean:
+        if not s:
+            continue
+        if corrected and s.lower() == corrected.lower():
+            continue
+        if any(s.lower() == t.lower() for t in cleaned_synonyms):
+            continue
+        cleaned_synonyms.append(s)
+        if len(cleaned_synonyms) >= MAX_SYNONYMS:
+            break
+
     terms: List[str] = []
     if corrected:
         terms.append(corrected)
-    for s in synonyms_clean:
-        if s.lower() == corrected.lower():
-            continue
-        if any(s.lower() == t.lower() for t in terms):
-            continue
-        terms.append(s)
+    terms.extend(cleaned_synonyms)
 
-    print(f"[cond-llm] terms (corrected + synonyms uniques)={terms}")
+    print(f"[cond-llm] terms (corrected + synonyms uniques, limited)={terms}")
 
     if not terms:
-        # On n'a rien récupéré de propre → on renvoie la condition brute
         query = cond
     else:
         if len(terms) == 1:
-            # Une seule maladie → pas besoin de OR
             query = terms[0]
         else:
-            # Plusieurs termes, on les quote + OR
             query = " OR ".join(f'"{t}"' for t in terms)
 
     print(f"[cond-llm] OUTPUT query finale: {repr(query)}")
-    return query
+
+    payload = {
+        "corrected": corrected or cond,
+        "search_query": query,
+        "synonyms": cleaned_synonyms,
+    }
+    _cond_cache_set(cond, payload)
+    return payload
+
 
 # ---------------------------------------------------------------------
 # Routes
@@ -453,12 +420,15 @@ async def condition_query(
     condition: str = Query(..., min_length=2),
 ):
     """
-    Appelle seulement le LLM pour corriger la condition et élargir en requête.
-    Ne touche PAS à PubMed.
+    Appelle seulement le LLM pour corriger la condition et élargir en requête,
+    puis récupère un résumé MedlinePlus.
+
     Retourne:
       {
         "condition": "<tel que tapé (trim)>",
-        "search_query": "<requête élargie pour PubMed>"
+        "corrected": "<nom corrigé>",
+        "search_query": "<requête élargie pour PubMed>",
+        "medline_html": "<résumé HTML de la maladie si dispo>"
       }
     """
     condition = (condition or "").strip()
@@ -468,23 +438,47 @@ async def condition_query(
     print("\n========== [/condition_query] ==========")
     print(f"[cond_api] condition reçue: {repr(condition)}")
     try:
-        search_query = await _expand_condition_with_llm(condition)
-        if not search_query:
-            search_query = condition
-        print(f"[cond_api] search_query LLM: {repr(search_query)}")
+        exp = await _expand_condition_with_llm(condition)
+        corrected = (exp.get("corrected") or condition).strip()
+        search_query = (exp.get("search_query") or corrected).strip()
+        print(f"[cond_api] corrected={repr(corrected)}, search_query={repr(search_query)}")
     except Exception as e:
         print(f"[cond_api] ERREUR _expand_condition_with_llm: {type(e).__name__}: {e}")
         traceback.print_exc()
+        corrected = condition
         search_query = condition
-        print(f"[cond_api] Fallback search_query={repr(search_query)}")
+        print(f"[cond_api] Fallback corrected/search_query={repr(search_query)}")
+
+    # --- Appel MedlinePlus avec le nom corrigé ---
+    medline_html = ""
+    try:
+        # Si get_medlineplus_fullsummary est synchrone, enlève le "await".
+        medline_html = await get_medlineplus_fullsummary(corrected)
+        print(f"[cond_api] MedlinePlus summary OK (len={len(medline_html or '')})")
+    except TypeError:
+        # Cas où la fonction est synchrone (pas awaitable)
+        try:
+            medline_html = get_medlineplus_fullsummary(corrected)
+            print(f"[cond_api] MedlinePlus summary OK (sync, len={len(medline_html or '')})")
+        except Exception as e_sync:
+            print(f"[cond_api] ERREUR get_medlineplus_fullsummary (sync): {type(e_sync).__name__}: {e_sync}")
+            traceback.print_exc()
+            medline_html = ""
+    except Exception as e:
+        print(f"[cond_api] ERREUR get_medlineplus_fullsummary: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        medline_html = ""
 
     payload = {
-        "condition": condition,
-        "search_query": search_query,
+        "condition": condition,          # ce que l'utilisateur a tapé
+        "corrected": corrected,         # nom corrigé LLM
+        "search_query": search_query,   # requête PubMed
+        "medline_html": medline_html,   # résumé HTML MedlinePlus (ou "")
     }
-    print(f"[cond_api] Payload final: {payload}")
+    print(f"[cond_api] Payload final: keys={list(payload.keys())}")
     print("========== [/condition_query END] ==========\n")
     return payload
+
 
 @router.get("/recommendations")
 async def recommendations(
@@ -512,18 +506,14 @@ async def recommendations(
 
     print(f"[reco] Intervalle final: {from_year}-{to_year}")
 
-    # 1) LLM → query string
-    print(f"[reco] Intervalle final: {from_year}-{to_year}")
-
     # 1) LLM → query string (ou bien on reçoit déjà la query calculée)
     try:
         if llm_query:
             search_query = (llm_query or "").strip() or condition
             print(f"[reco] llm_query fourni par le client: {repr(search_query)}")
         else:
-            search_query = await _expand_condition_with_llm(condition)
-            if not search_query:
-                search_query = condition
+            exp = await _expand_condition_with_llm(condition)
+            search_query = (exp.get("search_query") or condition).strip()
             print(f"[reco] search_query calculée par LLM côté serveur: {repr(search_query)}")
     except Exception as e:
         print(f"[reco] ERREUR cond-expansion: {type(e).__name__}: {e}")
@@ -555,26 +545,59 @@ async def recommendations(
             "error": f"PubMed upstream error: {type(e).__name__}",
         }
 
-    # 3) le reste (plantes, scores, etc.) inchangé...
-    plant_hits: Dict[str, List[Dict]] = defaultdict(list)
+    plant_groups: Dict[str, Dict[str, Any]] = {}
+
     for a in articles:
         pmid = a.get("pmid", "?")
         title = a.get("title", "")[:80]
         print(f"[reco] Analyse article PMID={pmid}, title≈{repr(title)}")
+
         text = f"{a.get('title','')} {a.get('abstract','')}"
         plants_found = list(find_plants_in_text(text, PLANTS_DB))
-        print(f"[reco]  → plantes trouvées: {plants_found}")
-        for plant in plants_found:
-            plant_hits[plant].append(a)
 
-    print(f"[reco] Nombre de plantes distinctes trouvées: {len(plant_hits)}")
+        # Nettoyage: unique + tri pour des labels stables
+        plants_unique = sorted(set(plants_found))
+        print(f"[reco]  → plantes trouvées (uniques/triées): {plants_unique}")
+
+        if not plants_unique:
+            # aucun végétal pertinent → on ignore l'article pour cette vue
+            continue
+
+        if len(plants_unique) == 1:
+            # Article avec UNE seule plante → on garde le comportement "par plante"
+            group_label = plants_unique[0]
+        else:
+            # Article avec PLUSIEURS plantes → on crée un groupe combinaison
+            # Exemple: "cannabidiol, ginger"
+            group_label = ", ".join(plants_unique)
+
+        grp = plant_groups.get(group_label)
+        if not grp:
+            grp = {
+                "plants": plants_unique,  # liste des plantes de ce groupe
+                "articles": [],
+            }
+            plant_groups[group_label] = grp
+
+        grp["articles"].append(a)
+
+    print(f"[reco] Nombre de groupes plante/combinaison: {len(plant_groups)}")
+
     results = []
-    for plant, arts in plant_hits.items():
-        print(f"[reco] Traitement plante='{plant}' avec {len(arts)} articles")
+    for label, grp in plant_groups.items():
+        arts = grp["articles"]
+        plants_list = grp["plants"]
+        print(f"[reco] Traitement groupe='{label}' avec {len(arts)} articles")
+
+        # On garde ta logique de score: somme des scores des 5 meilleurs articles du groupe
         scored = sorted(arts, key=score_article, reverse=True)
         plant_score = sum(score_article(a) for a in scored[:5])
         print(f"[reco]  → plant_score (top 5)={plant_score}")
-        summary = summarize_for_patients(plant, scored)
+
+        # On peut passer le label complet à summarize_for_patients
+        # (ex: "cannabidiol, ginger") -> le prompt verra la liste de plantes.
+        summary = summarize_for_patients(label, scored)
+
         items = [
             {
                 "pmid": a.get("pmid", ""),
@@ -584,12 +607,15 @@ async def recommendations(
             }
             for a in scored[:5]
         ]
+
         results.append(
             {
-                "plant": plant,
+                "plant": label,          # ex: "cannabidiol" ou "cannabidiol, ginger"
                 "score": round(plant_score, 2),
                 "summary": summary,
                 "top_studies": items,
+                # si un jour tu en as besoin côté front:
+                # "plant_list": plants_list,
             }
         )
 
@@ -600,9 +626,11 @@ async def recommendations(
         "search_query": search_query, # query réelle utilisée pour PubMed
         "results": results,
     }
-    print(f"[reco] Payload final (résumé): condition={payload['condition']}, "
-          f"search_query={payload['search_query']}, "
-          f"#results={len(payload['results'])}")
+    print(
+        f"[reco] Payload final (résumé): condition={payload['condition']}, "
+        f"search_query={payload['search_query']}, "
+        f"#results={len(payload['results'])}"
+    )
     print("========== [/recommendations END] ==========\n")
     return payload
 
@@ -646,8 +674,10 @@ async def explore_stream(
         "journal": a.get("journal", ""),
         "year": a.get("year", ""),
     }
-    print(f"[explore_stream] Doc récupéré pour PMID={pmid}: "
-          f"title={repr(doc['title'][:80])}, year={doc['year']}, journal={repr(doc['journal'])}")
+    print(
+        f"[explore_stream] Doc récupéré pour PMID={pmid}: "
+        f"title={repr(doc['title'][:80])}, year={doc['year']}, journal={repr(doc['journal'])}"
+    )
 
     # RAG identique à /explore
     chunks = _make_corpus(doc)
@@ -669,10 +699,29 @@ async def explore_stream(
     context = "\n".join(f"{t['text']}" for t in top)
     t2 = time.perf_counter()
     print(f"[perf] (stream) efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
-    print(f"[explore_stream] Longueur contexte (caractères): {len(context)}")
-    print(f"[explore_stream] Extrait contexte (200 premiers caractères): "
-          f"{repr(context[:200])}")
-    plant_for_prompt = (plant or "unspecified").strip()
+    print(
+        f"[explore_stream] Longueur contexte (caractères): {len(context)}"
+    )
+    print(
+        f"[explore_stream] Extrait contexte (200 premiers caractères): "
+        f"{repr(context[:200])}"
+    )
+    
+    raw_plant = (plant or "").strip()
+    if raw_plant:
+        # Exemple: "cannabidiol, ginger, turmeric"
+        parts = [p.strip() for p in raw_plant.split(",") if p.strip()]
+        if len(parts) == 1:
+            plant_for_prompt = parts[0]                     # "ginger"
+        elif len(parts) == 2:
+            plant_for_prompt = " and ".join(parts)          # "cannabidiol and ginger"
+        else:
+            # "cannabidiol, ginger and turmeric"
+            plant_for_prompt = ", ".join(parts[:-1]) + " and " + parts[-1]
+    else:
+        # fallback neutre quand aucune plante n’est fournie par le front
+        plant_for_prompt = "all plants mentioned in the CONTEXT"
+
     print(f"[explore_stream] plant_for_prompt={repr(plant_for_prompt)}")
 
     messages = [

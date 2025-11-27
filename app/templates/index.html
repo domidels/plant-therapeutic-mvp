@@ -59,6 +59,54 @@ const THIS_YEAR = new Date().getFullYear();
 const MIN_YEAR = 1980;
 const CONCURRENCY = 1;
 
+function showTypewriterHtmlLines(el, html, lineDelay = 50000) {
+  if (!el) return;
+
+  // On vide le conteneur
+  el.innerHTML = "";
+
+  // On parse le HTML dans un conteneur temporaire
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+
+  // On considère comme "lignes" les blocs suivants :
+  const lineNodes = tmp.querySelectorAll("h1,h2,h3,h4,h5,h6,p,li,div");
+
+  const nodes = Array.from(lineNodes);
+
+  if (nodes.length === 0) {
+    // fallback : pas de structure, on met tout d'un coup
+    el.innerHTML = html;
+    return;
+  }
+
+  let index = 0;
+
+  function addNextLine() {
+    if (index >= nodes.length) return;
+
+    const node = nodes[index];
+    const wrapper = document.createElement("div");
+    wrapper.className = "tw-line";
+    wrapper.innerHTML = node.outerHTML;
+    el.appendChild(wrapper);
+
+    // déclenche l'animation d'apparition
+    // (transition gérée en CSS)
+    requestAnimationFrame(() => {
+      wrapper.classList.add("tw-line-visible");
+    });
+
+    index += 1;
+    setTimeout(addNextLine, lineDelay);
+  }
+
+  // On démarre
+  addNextLine();
+}
+
+
+
 // --- Initialisation de la liste déroulante ---
 function initYearSelect() {
   const sel = document.getElementById('fromYear');
@@ -245,9 +293,10 @@ async function runApiByYear(condition, llmQuery, out){
 
 
 // Bouton + touche Entrée
-async function run(){
+async function run() {
   const rawCond = document.getElementById('cond').value.trim();
-  if(!rawCond) return;
+  if (!rawCond) return;
+
   const out = document.getElementById('out');
 
   // récupère l'année choisie, sinon garde le comportement d'avant
@@ -263,44 +312,56 @@ async function run(){
     START_YEAR = START_YEAR_DEFAULT;
   }
 
-  // Prépare le squelette: bandeau + progress + années vides
+  // Prépare le squelette: bandeau + résumé maladie + progress + années vides
   out.innerHTML = `
-  <div id="searchInfo" class="search-banner muted">Thinking about your condition…</div>
-  <div id="progress" class="muted" style="margin-top:.5rem"></div>
-  <div id="years"></div>
-`;
+    <div id="searchInfo" class="search-banner muted">Thinking about your condition…</div>
+    <div id="diseaseSummary" class="card" style="margin-top:.5rem; display:none;">
+      <div class="muted" style="margin-bottom:.25rem;"><strong>About this condition</strong></div>
+      <div id="diseaseSummaryText"></div>
+    </div>
+    <div id="progress" class="muted" style="margin-top:.5rem"></div>
+    <div id="years"></div>
+  `;
 
-  const searchInfoEl = document.getElementById('searchInfo');
+  const searchInfoEl  = document.getElementById('searchInfo');
+  const summaryBoxEl  = document.getElementById('diseaseSummary');
+  const summaryTextEl = document.getElementById('diseaseSummaryText');
 
-  // 1) On appelle d'abord le LLM (condition_query), sans PubMed
-  let condition = rawCond;
-  let llmQuery  = rawCond;
+  // 1) Appel /api/condition_query : normalisation + requête PubMed + résumé MedlinePlus
+  let condition   = rawCond;
+  let llmQuery    = rawCond;
+  let medlineHtml = "";
 
   try {
-    const v = Date.now();
+    const v   = Date.now(); // anti-cache
     const url = `/api/condition_query?condition=${encodeURIComponent(rawCond)}&_v=${v}`;
-    const r = await fetch(url, { cache: 'no-store' });
+    const r   = await fetch(url, { cache: 'no-store' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
+
     const js = await r.json();
-    condition = (js.condition || rawCond).trim();
-    llmQuery  = (js.search_query || rawCond).trim();
+    condition   = (js.condition     || rawCond).trim();
+    llmQuery    = (js.search_query  || rawCond).trim();
+    medlineHtml = (js.medline_html  || "").trim();
     console.log("[UI] condition_query retour:", js);
-  } catch(e) {
+  } catch (e) {
     console.error("[UI] Erreur condition_query:", e);
-    // on garde rawCond comme fallback
-    condition = rawCond;
-    llmQuery  = rawCond;
+    // fallback: on garde la condition brute
+    condition   = rawCond;
+    llmQuery    = rawCond;
+    medlineHtml = "";
   }
 
-  // 2) Dès que le LLM a fini → on met à jour le bandeau "Searching for: ..."
+  // 2) Met à jour le bandeau "Searching for ..."
   let terms = [];
   if (llmQuery) {
     const parts = llmQuery.split(/\s+OR\s+/i);
-    terms = parts.map(s => {
-      const m = s.match(/^"(.*)"$/);
-      const t = m ? m[1] : s;
-      return t.trim();
-    }).filter(Boolean);
+    terms = parts
+      .map(s => {
+        const m = s.match(/^"(.*)"$/);
+        const t = m ? m[1] : s;
+        return t.trim();
+      })
+      .filter(Boolean);
   }
 
   let msg = "";
@@ -317,19 +378,35 @@ async function run(){
   }
 
   if (searchInfoEl) {
-    searchInfoEl.textContent = msg;   // <– pas de HTML, juste du texte
+    searchInfoEl.textContent = msg;   // texte simple, pas de HTML
   }
   console.log("[UI] searchInfo:", msg);
 
-  // 3) Maintenant seulement on lance PubMed année par année, en passant la query LLM
-  try{
+  // 2bis) Afficher le résumé MedlinePlus, ligne par ligne
+  if (summaryBoxEl && summaryTextEl) {
+    if (medlineHtml) {
+      summaryBoxEl.style.display = 'block';
+
+      // Effet "machine à écrire" ligne par ligne
+      // lineDelay en ms : 600 = une nouvelle ligne toutes les 0.6 s
+      showTypewriterHtmlLines(summaryTextEl, medlineHtml, 600);
+
+    } else {
+      summaryBoxEl.style.display = 'none';
+      summaryTextEl.innerHTML = "";
+    }
+  }
+
+  // 3) Ensuite on lance PubMed année par année, en passant la query LLM
+  try {
     await runApiByYear(condition, llmQuery, out);
-  }catch(e){
+  } catch (e) {
     console.error(e);
     const progressEl = document.getElementById('progress');
     if (progressEl) progressEl.textContent = "Error fetching results.";
   }
 }
+
 
 
 document.getElementById('btn').addEventListener('click', run);

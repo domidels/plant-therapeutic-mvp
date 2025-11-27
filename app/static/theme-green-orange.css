@@ -463,3 +463,20 @@ footer{
   .search-banner strong {
     font-weight: 600;            /* maladie corrigée bien en gras */
   }
+
+  #diseaseSummaryText {
+  position: relative;
+}
+
+/* Ligne ajoutée progressivement */
+.tw-line {
+  opacity: 0;
+  transform: translateY(0.25em);
+}
+
+/* Quand la ligne est rendue visible */
+.tw-line-visible {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.4s ease-out, transform 0.4s ease-out;
+}
