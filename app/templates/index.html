@@ -13,23 +13,6 @@
   <!-- NOTE: path commence par '/' pour StaticFiles -->
   <link rel="stylesheet" href="{{ url_for('static', path='/theme-green-orange.css') }}">
 
-  <style>
-    .row { display: flex; gap: .5rem; align-items: center; margin: .5rem 0 1rem; }
-    input#cond { flex: 1; padding: .5rem .75rem; font-size: 1rem; }
-    select#fromYear { padding: .5rem .75rem; font-size: .95rem; }
-    button { padding: .5rem .9rem; cursor: pointer; }
-    .muted { color: #666; font-size: .95rem; }
-    .card { border: 1px solid #e3e3e3; padding: .75rem 1rem; border-radius: .5rem; margin:.5rem 0; background:#fff; }
-    .badge { margin-left:.5rem; font-size:.85rem; background:#f4f4f4; padding:.1rem .4rem; border-radius:.4rem; }
-    .year-block { margin: 1rem 0 1.5rem; }
-    h2 { margin:.25rem 0 .5rem; }
-    footer { margin-top: 2rem; color:#777; font-size:.9rem; }
-    a { text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .ai-btn { margin-top: .35rem; font-size: .9rem; border: 1px solid #ddd; background: #f8f8f8; border-radius: .4rem; }
-    .ai-btn:disabled { opacity: .6; cursor: not-allowed; }
-    .ai-box { margin-top:.5rem; background:#fcfcff; }
-  </style>
 </head>
 
 <body>
@@ -389,7 +372,7 @@ async function run() {
 
       // Effet "machine à écrire" ligne par ligne
       // lineDelay en ms : 600 = une nouvelle ligne toutes les 0.6 s
-      showTypewriterHtmlLines(summaryTextEl, medlineHtml, 600);
+      showTypewriterHtmlLines(summaryTextEl, medlineHtml, 1800);
 
     } else {
       summaryBoxEl.style.display = 'none';

@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from fastembed import TextEmbedding
 from app.services.medline import get_medlineplus_fullsummary
 from app.services.pubmed import efetch, search_and_fetch
-from app.services.plants import load_plants, find_plants_in_text
+from app.services.plants_v2 import load_plants, find_plants_in_text
 from app.services.ranking import score_article, summarize_for_patients
 
 # ---------------------------------------------------------------------
@@ -175,10 +175,10 @@ _USER_TMPL = (
     "Study: {title} — {year} / {journal}\n\n"
     "CONTEXT:\n{context}\n\n"
     "YOUR ONLY GOAL IS TO RELATE MAIN KEY FINDINGS FROM THIS CONTEXT AND THIS CONTEXT ONLY.\n"
-    "PROVIDE SIMPLE INFORMATION AS PER THE FOLLOWING INSTRUCTIONS:\n"
-    "- main KEY FINDINGS related to {plant} (one or several plants) and any plant compound IF mentioned in the CONTEXT.\n"
-    "- who (Women, men, children), how many particpated, the age of participants to the study ONLY IF mentioned in the CONTEXT.\n"
-    "- study duration ONLY IF mentioned in the CONTEXT.\n"
+    "PROVIDE SIMPLE INFORMATION IF EXISTS IN THE CONTEXT AS PER THE FOLLOWING INSTRUCTIONS:\n"
+    "- main KEY FINDINGS related to {plant} (one or several plants) and any plant compound ONLY IF mentioned in the CONTEXT.\n"
+    "- who (Women, men, children), how many participated, the age of participants to the study ONLY IF mentioned in the CONTEXT.\n"
+    "- study duration ONLY ONLY IF in the CONTEXT.\n"
     "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT.\n"
     "- adverse effects and limitations ONLY IF mentioned in the CONTEXT.\n"
     "\n"
@@ -186,6 +186,7 @@ _USER_TMPL = (
     "Use ONLY SIMPLE everyday words.\n"
     "DO NOT USE abbreviations, acronyms, or codes.\n"
     "Do NOT use bullet points.\n"
+    "Do NOT describe the condition.\n"
     "\n"
     "Return ONLY the paragraph."
 )
