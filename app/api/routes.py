@@ -4,20 +4,21 @@ from __future__ import annotations
 import json
 import os
 import time
+import traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import traceback
 
 import httpx
 import numpy as np
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from fastembed import TextEmbedding
+
 from app.services.medline import get_medlineplus_fullsummary
+from app.services.plants_v2 import find_plants_in_text, load_plants
 from app.services.pubmed import efetch, search_and_fetch
-from app.services.plants_v2 import load_plants, find_plants_in_text
 from app.services.ranking import score_article, summarize_for_patients
 
 # ---------------------------------------------------------------------
@@ -55,10 +56,12 @@ OLLAMA_HAS_V1 = _probe_v1_support()
 # ---------------------------------------------------------------------
 import re
 
+
 def _sentence_split(text: str) -> List[str]:
     # Découpe sur . ! ? mais en gardant les séparateurs
-    sents = re.split(r'(?<=[.!?])\s+', text.strip())
+    sents = re.split(r"(?<=[.!?])\s+", text.strip())
     return [s for s in sents if s]
+
 
 def _chunk_text_sentence_safe(txt: str, max_len=800) -> List[str]:
     sentences = _sentence_split(txt)
@@ -80,22 +83,51 @@ def _chunk_text_sentence_safe(txt: str, max_len=800) -> List[str]:
     return chunks
 
 
-def _make_embedder():
-    preferred = "mixedbread-ai/mxbai-embed-large-v1"
-    fallback = "sentence-transformers/all-MiniLM-L6-v2"
-    try:
-        return TextEmbedding(model_name=preferred)
-    except Exception:
-        return TextEmbedding(model_name=fallback)
+# ---------------------------------------------------------------------
+# Embeddings (LAZY INIT) - important for Vercel/serverless
+# ---------------------------------------------------------------------
+_EMB: Optional[TextEmbedding] = None
 
 
-_EMB = _make_embedder()
+def _configure_fastembed_cache():
+    """
+    Sur Vercel/serverless:
+    - /tmp est le seul endroit écrivable fiable
+    - fastembed/huggingface cache doivent être dirigés vers /tmp
+    """
+    cache_root = os.getenv("FASTEMBED_CACHE_PATH") or "/tmp/fastembed_cache"
+
+    # fastembed (selon versions, le nom peut varier)
+    os.environ.setdefault("FASTEMBED_CACHE_PATH", cache_root)
+    os.environ.setdefault("FASTEMBED_CACHE_DIR", cache_root)
+
+    # huggingface_hub / transformers caches (utile car fastembed télécharge via HF)
+    os.environ.setdefault("HF_HOME", "/tmp/hf")
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/hf/hub")
+    os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf/transformers")
+
+
+def _make_embedder() -> TextEmbedding:
+    _configure_fastembed_cache()
+
+    # Modèle ONNX connu/compatible fastembed
+    # (ton fallback précédent "sentence-transformers/..." n’est pas un nom fastembed ONNX fiable)
+    model_name = os.getenv("EMBED_MODEL") or "qdrant/all-MiniLM-L6-v2-onnx"
+    return TextEmbedding(model_name=model_name)
+
+
+def _get_embedder() -> TextEmbedding:
+    global _EMB
+    if _EMB is None:
+        print("[embed] Initializing embedder (lazy)")
+        _EMB = _make_embedder()
+        print("[embed] Embedder initialized OK")
+    return _EMB
 
 
 def _clean_text(s: str) -> str:
     # supprime les caractères de contrôle (hors \n, \t)
     return "".join(ch for ch in s if ch == "\n" or ch == "\t" or ord(ch) >= 32)
-
 
 
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -111,7 +143,8 @@ def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
 def _build_index(chunks: List[Dict[str, str]]):
     import faiss  # lazy import
 
-    vecs = list(_EMB.embed([c["text"] for c in chunks]))
+    emb = _get_embedder()
+    vecs = list(emb.embed([c["text"] for c in chunks]))
     X = np.vstack(vecs).astype("float32")
     faiss.normalize_L2(X)
     idx = faiss.IndexFlatIP(X.shape[1])
@@ -122,8 +155,10 @@ def _build_index(chunks: List[Dict[str, str]]):
 def _retrieve(idx, X, chunks, query: str, top_k=5) -> List[Dict[str, str]]:
     import faiss
 
+    emb = _get_embedder()
+
     # 1) Embed + normalisation de la requête
-    qv = np.array(list(_EMB.embed([query]))[0], dtype="float32")
+    qv = np.array(list(emb.embed([query]))[0], dtype="float32")
     faiss.normalize_L2(qv.reshape(1, -1))
 
     # 2) Recherche FAISS
@@ -190,7 +225,6 @@ _USER_TMPL = (
     "\n"
     "Return ONLY the paragraph."
 )
-
 
 # ---------------------------------------------------------------------
 # Plants DB + caches
@@ -264,6 +298,7 @@ async def _ollama_chat(
                 return content
 
     return json.dumps(js, ensure_ascii=False)
+
 
 _COND_EXPANSION_TTL = 60 * 60  # 1h pour le cache
 _COND_EXPANSION_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -360,7 +395,7 @@ async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
             line_stripped = line.strip()
             up = line_stripped.upper()
             if up.startswith("CORRECTED:"):
-                value = line_stripped[len("CORRECTED:"):].strip()
+                value = line_stripped[len("CORRECTED:") :].strip()
                 if value:
                     corrected = value
 
@@ -462,7 +497,9 @@ async def condition_query(
             medline_html = get_medlineplus_fullsummary(corrected)
             print(f"[cond_api] MedlinePlus summary OK (sync, len={len(medline_html or '')})")
         except Exception as e_sync:
-            print(f"[cond_api] ERREUR get_medlineplus_fullsummary (sync): {type(e_sync).__name__}: {e_sync}")
+            print(
+                f"[cond_api] ERREUR get_medlineplus_fullsummary (sync): {type(e_sync).__name__}: {e_sync}"
+            )
             traceback.print_exc()
             medline_html = ""
     except Exception as e:
@@ -471,10 +508,10 @@ async def condition_query(
         medline_html = ""
 
     payload = {
-        "condition": condition,          # ce que l'utilisateur a tapé
-        "corrected": corrected,         # nom corrigé LLM
-        "search_query": search_query,   # requête PubMed
-        "medline_html": medline_html,   # résumé HTML MedlinePlus (ou "")
+        "condition": condition,  # ce que l'utilisateur a tapé
+        "corrected": corrected,  # nom corrigé LLM
+        "search_query": search_query,  # requête PubMed
+        "medline_html": medline_html,  # résumé HTML MedlinePlus (ou "")
     }
     print(f"[cond_api] Payload final: keys={list(payload.keys())}")
     print("========== [/condition_query END] ==========\n")
@@ -595,8 +632,6 @@ async def recommendations(
         plant_score = sum(score_article(a) for a in scored[:5])
         print(f"[reco]  → plant_score (top 5)={plant_score}")
 
-        # On peut passer le label complet à summarize_for_patients
-        # (ex: "cannabidiol, ginger") -> le prompt verra la liste de plantes.
         summary = summarize_for_patients(label, scored)
 
         items = [
@@ -611,20 +646,18 @@ async def recommendations(
 
         results.append(
             {
-                "plant": label,          # ex: "cannabidiol" ou "cannabidiol, ginger"
+                "plant": label,  # ex: "cannabidiol" ou "cannabidiol, ginger"
                 "score": round(plant_score, 2),
                 "summary": summary,
                 "top_studies": items,
-                # si un jour tu en as besoin côté front:
-                # "plant_list": plants_list,
             }
         )
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
     payload = {
-        "condition": condition,       # ce que l'utilisateur a tapé
-        "search_query": search_query, # query réelle utilisée pour PubMed
+        "condition": condition,  # ce que l'utilisateur a tapé
+        "search_query": search_query,  # query réelle utilisée pour PubMed
         "results": results,
     }
     print(
@@ -635,12 +668,6 @@ async def recommendations(
     print("========== [/recommendations END] ==========\n")
     return payload
 
-
-
-from fastapi.responses import StreamingResponse
-import json
-
-# # ...
 
 @router.get("/explore_stream")
 async def explore_stream(
@@ -661,9 +688,11 @@ async def explore_stream(
 
     if not arts:
         print(f"[explore_stream] Aucun article trouvé pour PMID={pmid}")
+
         async def gen_empty():
             yield "No abstract found.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+
         print("========== [/explore_stream END] (no arts) ==========\n")
         return StreamingResponse(gen_empty(), media_type="text/plain")
 
@@ -685,37 +714,41 @@ async def explore_stream(
     print(f"[explore_stream] Nb de chunks dans le corpus: {len(chunks)}")
     if not chunks:
         print("[explore_stream] Aucun chunk (pas de titre/abstract exploitable)")
+
         async def gen_no_abs():
             yield "No abstract text available.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+
         print("========== [/explore_stream END] (no chunks) ==========\n")
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
-    idx, X = _build_index(chunks)
     query = f"Key findings and limitations of: {doc['title']}"
-    print(f"[explore_stream] RAG query: {repr(query)}")
-    top = _retrieve(idx, X, chunks, query, top_k=5)
-    print(f"[explore_stream] Nb de chunks top-k pour contexte: {len(top)}")
 
-    context = "\n".join(f"{t['text']}" for t in top)
+    # IMPORTANT: si embeddings/faiss échouent (Vercel), on fallback proprement sans casser l’API
+    try:
+        idx, X = _build_index(chunks)
+        print(f"[explore_stream] RAG query: {repr(query)}")
+        top = _retrieve(idx, X, chunks, query, top_k=5)
+        print(f"[explore_stream] Nb de chunks top-k pour contexte: {len(top)}")
+        context = "\n".join(f"{t['text']}" for t in top)
+    except Exception as e:
+        print(f"[explore_stream] RAG failed, fallback to full abstract: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        context = (doc.get("abstract") or doc.get("title") or "")[:6000]
+
     t2 = time.perf_counter()
-    print(f"[perf] (stream) efetch={t1-t0:.2f}s  rag={t2-t1:.2f}s (pmid={pmid})")
-    print(
-        f"[explore_stream] Longueur contexte (caractères): {len(context)}"
-    )
-    print(
-        f"[explore_stream] Extrait contexte (200 premiers caractères): "
-        f"{repr(context[:200])}"
-    )
-    
+    print(f"[perf] (stream) efetch={t1-t0:.2f}s  rag_or_fallback={t2-t1:.2f}s (pmid={pmid})")
+    print(f"[explore_stream] Longueur contexte (caractères): {len(context)}")
+    print(f"[explore_stream] Extrait contexte (200 premiers caractères): {repr(context[:200])}")
+
     raw_plant = (plant or "").strip()
     if raw_plant:
         # Exemple: "cannabidiol, ginger, turmeric"
         parts = [p.strip() for p in raw_plant.split(",") if p.strip()]
         if len(parts) == 1:
-            plant_for_prompt = parts[0]                     # "ginger"
+            plant_for_prompt = parts[0]  # "ginger"
         elif len(parts) == 2:
-            plant_for_prompt = " and ".join(parts)          # "cannabidiol and ginger"
+            plant_for_prompt = " and ".join(parts)  # "cannabidiol and ginger"
         else:
             # "cannabidiol, ginger and turmeric"
             plant_for_prompt = ", ".join(parts[:-1]) + " and " + parts[-1]
@@ -740,7 +773,7 @@ async def explore_stream(
         },
     ]
     print("[explore_stream] Messages envoyés au LLM (non-stream, structure):")
-    print(json.dumps(messages, ensure_ascii=False, indent=2)[:2000])  # pour éviter de tout spammer
+    print(json.dumps(messages, ensure_ascii=False, indent=2)[:2000])
 
     async def event_generator():
         t3 = time.perf_counter()
@@ -778,32 +811,36 @@ async def explore_stream(
                         line_count += 1
                         if not line:
                             continue
-                        # log brut des premières lignes
+
                         if line_count <= 10:
                             print(f"[explore_stream] Ligne brute #{line_count}: {repr(line)}")
 
                         # format OpenAI-like: "data: {...}"
                         if line.startswith("data: "):
-                            data = line[len("data: "):].strip()
+                            data = line[len("data: ") :].strip()
                         else:
                             continue
+
                         if data == "[DONE]":
                             print("[explore_stream] Reçu [DONE] du LLM")
                             break
+
                         try:
                             js = json.loads(data)
                         except json.JSONDecodeError as e:
                             print(f"[explore_stream] JSONDecodeError sur chunk streaming: {e}")
                             print(f"[explore_stream]   data brut: {repr(data)[:200]}")
                             continue
+
                         choices = js.get("choices") or []
                         if not choices:
                             print("[explore_stream] Chunk sans choices, ignoré")
                             continue
+
                         delta = (choices[0].get("delta") or {}).get("content")
                         if not delta:
                             continue
-                        # nettoyage léger comme _clean_text
+
                         chunk = _clean_text(delta)
                         if chunk:
                             token_count += 1
@@ -821,7 +858,6 @@ async def explore_stream(
         print(f"[perf] llm_stream={t4-t3:.2f}s (stream)")
         print("[explore_stream] Fin du stream, ajout des références.")
 
-        # Ajout des références en fin de flux
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
         print("========== [/explore_stream END] ==========\n")
