@@ -4,6 +4,7 @@ app/api/__pycache__/
 Thumbs.db
 .venv/
 .env/
+.env
 # --- Editors/IDE ---
 .vscode/
 .idea/
