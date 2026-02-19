@@ -8,7 +8,7 @@ import traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -110,8 +110,6 @@ def _configure_fastembed_cache():
 def _make_embedder() -> TextEmbedding:
     _configure_fastembed_cache()
 
-    # Modèle ONNX connu/compatible fastembed
-    # (ton fallback précédent "sentence-transformers/..." n’est pas un nom fastembed ONNX fiable)
     model_name = os.getenv("EMBED_MODEL") or "qdrant/all-MiniLM-L6-v2-onnx"
     return TextEmbedding(model_name=model_name)
 
@@ -178,7 +176,6 @@ def _retrieve(idx, X, chunks, query: str, top_k=5) -> List[Dict[str, str]]:
             break
 
     # 4) On re-trie les indices selon l'ordre d'apparition dans le document
-    #    => on privilégie la cohérence de lecture plutôt que l'ordre de score brut
     selected_sorted = sorted(selected)
 
     # 5) On renvoie les chunks dans l'ordre du texte
@@ -258,33 +255,54 @@ _LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
 _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
 # ---------------------------------------------------------------------
-# LLM helper (un seul prompt, /v1/completions)
+# LLM helpers (factorisé): payload + non-stream + stream
 # ---------------------------------------------------------------------
+def _ollama_payload(
+    messages: List[Dict[str, str]],
+    *,
+    stream: bool,
+    max_tokens: int,
+    num_ctx: int,
+    temperature: float,
+) -> Dict[str, Any]:
+    return {
+        "model": MODEL,
+        "messages": messages,
+        "stream": stream,
+        "options": {
+            "num_ctx": num_ctx,
+            "num_predict": max_tokens,
+            "temperature": temperature,
+            "keep_alive": "100m",
+            "num_thread": max(1, (os.cpu_count() or 2) // 2),
+        },
+    }
+
+
 async def _ollama_chat(
     messages: List[Dict[str, str]],
     max_tokens: int = 900,
     num_ctx: int = 516,  # ignoré par llama-server, mais gardé pour compat
     temperature: float = 0.2,
 ) -> str:
-    payload_legacy = {
-        "model": MODEL,
-        "messages": messages,
-        "stream": False,
-        "options": {
-            "num_ctx": num_ctx,
-            "num_predict": max_tokens,
-            "temperature": temperature,
-            "keep_alive": "100m",
-            "num_thread": max(1, os.cpu_count() // 2),
-        },
-    }
+    """
+    Appel non-stream vers /v1/chat/completions, format OpenAI-like.
+    """
+    payload = _ollama_payload(
+        messages,
+        stream=False,
+        max_tokens=max_tokens,
+        num_ctx=num_ctx,
+        temperature=temperature,
+    )
+
     async with httpx.AsyncClient(
         timeout=_HTTP_TIMEOUT,
         limits=_LIMITS,
         transport=_TRANSPORT,
         trust_env=False,
     ) as client:
-        r = await client.post(f"{BASE}/v1/chat/completions", json=payload_legacy)
+        r = await client.post(f"{BASE}/v1/chat/completions", json=payload)
         r.raise_for_status()
         js = r.json()
 
@@ -298,6 +316,65 @@ async def _ollama_chat(
                 return content
 
     return json.dumps(js, ensure_ascii=False)
+
+
+async def _ollama_chat_stream(
+    messages: List[Dict[str, str]],
+    max_tokens: int = 300,
+    num_ctx: int = 4096,
+    temperature: float = 0.0,
+) -> AsyncIterator[str]:
+    """
+    Stream SSE OpenAI-like depuis /v1/chat/completions.
+    Yields uniquement des chunks texte nettoyés (pas de 'data:' brut).
+    """
+    payload = _ollama_payload(
+        messages,
+        stream=True,
+        max_tokens=max_tokens,
+        num_ctx=num_ctx,
+        temperature=temperature,
+    )
+
+    async with httpx.AsyncClient(
+        timeout=_STREAM_TIMEOUT,
+        limits=_LIMITS,
+        transport=_TRANSPORT,
+        trust_env=False,
+    ) as client:
+        async with client.stream(
+            "POST",
+            f"{BASE}/v1/chat/completions",
+            json=payload,
+        ) as r:
+            r.raise_for_status()
+
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data: "):
+                    continue
+
+                data = line[len("data: ") :].strip()
+                if data == "[DONE]":
+                    break
+
+                try:
+                    js = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = js.get("choices") or []
+                if not choices:
+                    continue
+
+                delta = (choices[0].get("delta") or {}).get("content")
+                if not delta:
+                    continue
+
+                chunk = _clean_text(delta)
+                if chunk:
+                    yield chunk
 
 
 _COND_EXPANSION_TTL = 60 * 60  # 1h pour le cache
@@ -488,7 +565,6 @@ async def condition_query(
     # --- Appel MedlinePlus avec le nom corrigé ---
     medline_html = ""
     try:
-        # Si get_medlineplus_fullsummary est synchrone, enlève le "await".
         medline_html = await get_medlineplus_fullsummary(corrected)
         print(f"[cond_api] MedlinePlus summary OK (len={len(medline_html or '')})")
     except TypeError:
@@ -606,7 +682,6 @@ async def recommendations(
             group_label = plants_unique[0]
         else:
             # Article avec PLUSIEURS plantes → on crée un groupe combinaison
-            # Exemple: "cannabidiol, ginger"
             group_label = ", ".join(plants_unique)
 
         grp = plant_groups.get(group_label)
@@ -772,81 +847,21 @@ async def explore_stream(
             ),
         },
     ]
-    print("[explore_stream] Messages envoyés au LLM (non-stream, structure):")
+    print("[explore_stream] Messages envoyés au LLM (stream, structure):")
     print(json.dumps(messages, ensure_ascii=False, indent=2)[:2000])
 
     async def event_generator():
         t3 = time.perf_counter()
         print("[explore_stream] event_generator démarré")
+
         try:
-            payload = {
-                "model": MODEL,
-                "messages": messages,
-                "stream": True,
-                "options": {
-                    "num_ctx": 4096,
-                    "num_predict": 300,
-                    "temperature": 0.0,
-                    "keep_alive": "100m",
-                    "num_thread": max(1, os.cpu_count() // 2),
-                },
-            }
-            print("[explore_stream] Payload envoyé à /v1/chat/completions (stream):")
-            print(json.dumps(payload, ensure_ascii=False, indent=2)[:2000])
-
-            async with httpx.AsyncClient(
-                timeout=_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False
-            ) as client:
-                print(f"[explore_stream] Connexion streaming vers {BASE}/v1/chat/completions")
-                async with client.stream(
-                    "POST",
-                    f"{BASE}/v1/chat/completions",
-                    json=payload,
-                ) as r:
-                    print(f"[explore_stream] Status LLM streaming HTTP: {r.status_code}")
-                    r.raise_for_status()
-                    line_count = 0
-                    token_count = 0
-                    async for line in r.aiter_lines():
-                        line_count += 1
-                        if not line:
-                            continue
-
-                        if line_count <= 10:
-                            print(f"[explore_stream] Ligne brute #{line_count}: {repr(line)}")
-
-                        # format OpenAI-like: "data: {...}"
-                        if line.startswith("data: "):
-                            data = line[len("data: ") :].strip()
-                        else:
-                            continue
-
-                        if data == "[DONE]":
-                            print("[explore_stream] Reçu [DONE] du LLM")
-                            break
-
-                        try:
-                            js = json.loads(data)
-                        except json.JSONDecodeError as e:
-                            print(f"[explore_stream] JSONDecodeError sur chunk streaming: {e}")
-                            print(f"[explore_stream]   data brut: {repr(data)[:200]}")
-                            continue
-
-                        choices = js.get("choices") or []
-                        if not choices:
-                            print("[explore_stream] Chunk sans choices, ignoré")
-                            continue
-
-                        delta = (choices[0].get("delta") or {}).get("content")
-                        if not delta:
-                            continue
-
-                        chunk = _clean_text(delta)
-                        if chunk:
-                            token_count += 1
-                            if token_count <= 10:
-                                print(f"[explore_stream] Chunk texte #{token_count}: {repr(chunk)}")
-                            yield chunk
+            async for chunk in _ollama_chat_stream(
+                messages,
+                max_tokens=300,
+                num_ctx=4096,
+                temperature=0.0,
+            ):
+                yield chunk
 
         except Exception as e:
             err = f"\n[ERROR] LLM streaming failed: {type(e).__name__}: {e}\n"
@@ -856,8 +871,8 @@ async def explore_stream(
 
         t4 = time.perf_counter()
         print(f"[perf] llm_stream={t4-t3:.2f}s (stream)")
-        print("[explore_stream] Fin du stream, ajout des références.")
 
+        print("[explore_stream] Fin du stream, ajout des références.")
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
         print("========== [/explore_stream END] ==========\n")
