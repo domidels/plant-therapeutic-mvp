@@ -36,7 +36,7 @@ HF_API_TOKEN = os.getenv("HF_API_TOKEN", "").strip()
 HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
 
 # Endpoint serverless classique
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
 
 # Timeouts: l'API peut "cold start" (503 + estimated_time), donc read assez large.
 _HF_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
