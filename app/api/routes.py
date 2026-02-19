@@ -38,6 +38,11 @@ HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
 # Endpoint serverless classique
 HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
 
+
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_BASE_URL = "https://router.huggingface.co/v1"
+HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
+
 # Timeouts: l'API peut "cold start" (503 + estimated_time), donc read assez large.
 _HF_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
 _HF_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
@@ -377,14 +382,32 @@ async def _llm_chat(
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> str:
-    prompt = _format_messages_for_hf(messages)
-    out = await _hf_generate(
-        prompt,
-        max_new_tokens=max_tokens,
-        temperature=temperature,
-        do_sample=(temperature > 0.0),
-    )
-    return _clean_text(out).strip()
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN missing (Inference Providers token required).")
+
+    payload = {
+        "model": HF_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+
+    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=_HF_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
+        r = await client.post(f"{HF_BASE_URL}/chat/completions", headers=headers, json=payload)
+        r.raise_for_status()
+        js = r.json()
+
+    choices = js.get("choices") or []
+    if choices:
+        msg = (choices[0].get("message") or {}).get("content")
+        if msg:
+            return _clean_text(msg).strip()
+
+    return json.dumps(js, ensure_ascii=False)
+
 
 
 async def _llm_chat_stream(
@@ -392,16 +415,53 @@ async def _llm_chat_stream(
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> AsyncIterator[str]:
-    """
-    La Serverless Inference API HF n'offre pas un streaming SSE stable comme OpenAI.
-    On simule un "stream" en renvoyant la réponse en chunks (pour garder StreamingResponse côté client).
-    """
-    text = await _llm_chat(messages, max_tokens=max_tokens, temperature=temperature)
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN missing (Inference Providers token required).")
 
-    # chunking léger pour un effet "progressif"
-    chunk_size = 64
-    for i in range(0, len(text), chunk_size):
-        yield text[i : i + chunk_size]
+    payload = {
+        "model": HF_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+
+    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+
+    async with httpx.AsyncClient(timeout=_HF_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
+        async with client.stream(
+            "POST",
+            f"{HF_BASE_URL}/chat/completions",
+            headers=headers,
+            json=payload,
+        ) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data: "):
+                    continue
+
+                data = line[len("data: ") :].strip()
+                if data == "[DONE]":
+                    break
+
+                try:
+                    js = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = js.get("choices") or []
+                if not choices:
+                    continue
+
+                delta = (choices[0].get("delta") or {}).get("content")
+                if not delta:
+                    continue
+
+                chunk = _clean_text(delta)
+                if chunk:
+                    yield chunk
 
 
 async def asyncio_sleep(seconds: float) -> None:
