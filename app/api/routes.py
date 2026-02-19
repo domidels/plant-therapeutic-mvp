@@ -28,15 +28,7 @@ router = APIRouter()
 # ---------------------------------------------------------------------
 # Hugging Face Inference API config
 # ---------------------------------------------------------------------
-# Token HF: Settings -> Access Tokens (scope "read")
-HF_API_TOKEN = os.getenv("HF_API_TOKEN", "").strip()
 
-# Modèle à appeler via Serverless Inference API (latence variable en free tier)
-# Reco: modèle instruct pas trop lourd.
-HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
-
-# Endpoint serverless classique
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL}"
 
 
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
@@ -52,11 +44,11 @@ _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
 
 def _hf_headers() -> Dict[str, str]:
-    if not HF_API_TOKEN:
+    if not HF_TOKEN:
         # On laisse l'appel échouer clairement plus bas si la clé manque
         return {"Content-Type": "application/json"}
     return {
-        "Authorization": f"Bearer {HF_API_TOKEN}",
+        "Authorization": f"Bearer {HF_TOKEN}",
         "Content-Type": "application/json",
     }
 
@@ -302,8 +294,8 @@ async def _hf_generate(
     - Peut renvoyer 503 "model is loading" avec estimated_time.
     - Certaines configs de modèles refusent certains paramètres: on reste minimal.
     """
-    if not HF_API_TOKEN:
-        raise RuntimeError("HF_API_TOKEN is missing (set it in env vars).")
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN is missing (set it in env vars).")
 
     payload: Dict[str, Any] = {
         "inputs": prompt,
@@ -329,7 +321,7 @@ async def _hf_generate(
 
     async with httpx.AsyncClient(timeout=_HF_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
         while True:
-            r = await client.post(HF_API_URL, headers=headers, json=payload)
+            r = await client.post(HF_BASE_URL, headers=headers, json=payload)
 
             # Cas: modèle en chargement
             if r.status_code == 503:
