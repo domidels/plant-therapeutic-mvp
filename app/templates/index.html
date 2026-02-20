@@ -12,22 +12,21 @@
 
   <!-- NOTE: path commence par '/' pour StaticFiles -->
   <link rel="stylesheet" href="{{ url_for('static', path='/theme-green-orange.css') }}">
-
 </head>
 
 <body>
   <h1>Evidence-based natural plants for your condition</h1>
   <p class="muted">This tool summarizes <em>peer-reviewed</em> research from PubMed. It is <strong>information only</strong> and not medical advice.</p>
 
-<div class="row">
-  <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, IBS" />
+  <div class="row">
+    <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, IBS" />
 
-  <div class="row-actions">
-    <span class="start-label">Start searching from</span>
-    <select id="fromYear"></select>
-    <button id="btn">Search</button>
+    <div class="row-actions">
+      <span class="start-label">Start searching from</span>
+      <select id="fromYear"></select>
+      <button id="btn">Search</button>
+    </div>
   </div>
-</div>
 
   <div id="out"></div>
 
@@ -36,11 +35,20 @@
   </footer>
 
 <script>
-const START_YEAR_DEFAULT = 2025;   // comportement par défaut, comme avant
-let START_YEAR = START_YEAR_DEFAULT;
+/**
+ * ✅ Changement clé:
+ * - START_YEAR_DEFAULT supprimé
+ * - Par défaut: année courante (THIS_YEAR)
+ * - L'utilisateur peut choisir une autre année via la dropdown
+ */
+
 const THIS_YEAR = new Date().getFullYear();
 const MIN_YEAR = 1980;
 const CONCURRENCY = 1;
+
+// année réellement utilisée pour les requêtes (mise à jour quand on clique "Search"
+// et aussi à chaque change de la dropdown via un listener)
+let START_YEAR = THIS_YEAR;
 
 function showTypewriterHtmlLines(el, html, lineDelay = 50000) {
   if (!el) return;
@@ -88,8 +96,6 @@ function showTypewriterHtmlLines(el, html, lineDelay = 50000) {
   addNextLine();
 }
 
-
-
 // --- Initialisation de la liste déroulante ---
 function initYearSelect() {
   const sel = document.getElementById('fromYear');
@@ -97,18 +103,18 @@ function initYearSelect() {
 
   sel.innerHTML = '';
 
-  // années THIS_YEAR -> 1980
+  // années THIS_YEAR -> MIN_YEAR
   for (let y = THIS_YEAR; y >= MIN_YEAR; y--) {
     const opt = document.createElement('option');
     opt.value = String(y);
     opt.textContent = String(y);
-    if (y === START_YEAR_DEFAULT) {
-      opt.selected = true;  // par défaut 2025
+    if (y === THIS_YEAR) {
+      opt.selected = true;  // par défaut: année courante
     }
     sel.appendChild(opt);
   }
 
-  // sécurité : si 2025 n’est plus dans la plage pour une raison X
+  // sécurité : si la value n'est pas définie pour une raison X
   if (!sel.value) {
     sel.value = String(THIS_YEAR);
   }
@@ -126,7 +132,6 @@ const unesc = (s='') =>
    .replace(/&quot;/g,'"')
    .replace(/&#39;/g,"'")
    .replace(/&amp;/g,'&');
-
 
 async function exploreArticle(btnEl){
   const pmid  = btnEl.dataset.pmid;
@@ -272,9 +277,6 @@ async function runApiByYear(condition, llmQuery, out){
   progressEl.textContent = 'Done.';
 }
 
-
-
-
 // Bouton + touche Entrée
 async function run() {
   const rawCond = document.getElementById('cond').value.trim();
@@ -282,17 +284,13 @@ async function run() {
 
   const out = document.getElementById('out');
 
-  // récupère l'année choisie, sinon garde le comportement d'avant
+  // récupère l'année choisie, sinon année courante
   const sel = document.getElementById('fromYear');
   if (sel && sel.value) {
     const y = parseInt(sel.value, 10);
-    if (Number.isFinite(y)) {
-      START_YEAR = y;
-    } else {
-      START_YEAR = START_YEAR_DEFAULT;
-    }
+    START_YEAR = Number.isFinite(y) ? y : THIS_YEAR;
   } else {
-    START_YEAR = START_YEAR_DEFAULT;
+    START_YEAR = THIS_YEAR;
   }
 
   // Prépare le squelette: bandeau + résumé maladie + progress + années vides
@@ -371,7 +369,6 @@ async function run() {
       summaryBoxEl.style.display = 'block';
 
       // Effet "machine à écrire" ligne par ligne
-      // lineDelay en ms : 600 = une nouvelle ligne toutes les 0.6 s
       showTypewriterHtmlLines(summaryTextEl, medlineHtml, 1800);
 
     } else {
@@ -390,10 +387,15 @@ async function run() {
   }
 }
 
-
-
+// Events
 document.getElementById('btn').addEventListener('click', run);
 document.getElementById('cond').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') run(); });
+
+// ✅ Bonus UX: dès que l'utilisateur change la dropdown, on met à jour START_YEAR
+document.getElementById('fromYear')?.addEventListener('change', (ev) => {
+  const y = parseInt(ev.target.value, 10);
+  if (Number.isFinite(y)) START_YEAR = y;
+});
 
 // on initialise la liste déroulante immédiatement (le script est en bas de la page)
 initYearSelect();
