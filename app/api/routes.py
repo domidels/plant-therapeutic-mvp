@@ -10,10 +10,25 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
-import numpy as np
+# import numpy as np  # (RAG local) plus nécessaire si on n'embarque plus embeddings+faiss sur Vercel
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from fastembed import TextEmbedding
+
+# -----------------------------
+# (RAG local) IMPORTS DÉSACTIVÉS
+# -----------------------------
+# fastembed + faiss alourdissent énormément le bundle (limite 250MB sur Vercel serverless).
+# On garde ces lignes en commentaire pour référence.
+#
+# from fastembed import TextEmbedding
+#
+# def _build_index(...):
+#     import faiss
+#     ...
+#
+# def _retrieve(...):
+#     import faiss
+#     ...
 
 from app.services.medline import get_medlineplus_fullsummary
 from app.services.plants_v2 import find_plants_in_text, load_plants
@@ -28,9 +43,6 @@ router = APIRouter()
 # ---------------------------------------------------------------------
 # Hugging Face Inference API config
 # ---------------------------------------------------------------------
-
-
-
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 HF_BASE_URL = "https://router.huggingface.co/v1"
 HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
@@ -45,7 +57,6 @@ _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
 def _hf_headers() -> Dict[str, str]:
     if not HF_TOKEN:
-        # On laisse l'appel échouer clairement plus bas si la clé manque
         return {"Content-Type": "application/json"}
     return {
         "Authorization": f"Bearer {HF_TOKEN}",
@@ -54,8 +65,11 @@ def _hf_headers() -> Dict[str, str]:
 
 
 # ---------------------------------------------------------------------
-# Embeddings / RAG utils
+# (RAG local) UTILITAIRES CONSERVÉS POUR INFO (non utilisés sans embeddings)
 # ---------------------------------------------------------------------
+# On garde ces helpers car ils sont utiles pour chunker/formatter un abstract,
+# mais ils ne font plus de "retrieval" sans embeddings.
+
 import re
 
 
@@ -83,48 +97,11 @@ def _chunk_text_sentence_safe(txt: str, max_len=800) -> List[str]:
     return chunks
 
 
-# ---------------------------------------------------------------------
-# Embeddings (LAZY INIT) - important for Vercel/serverless
-# ---------------------------------------------------------------------
-_EMB: Optional[TextEmbedding] = None
-
-
-def _configure_fastembed_cache():
-    """
-    Sur Vercel/serverless:
-    - /tmp est le seul endroit écrivable fiable
-    - fastembed/huggingface cache doivent être dirigés vers /tmp
-    """
-    cache_root = os.getenv("FASTEMBED_CACHE_PATH") or "/tmp/fastembed_cache"
-
-    os.environ.setdefault("FASTEMBED_CACHE_PATH", cache_root)
-    os.environ.setdefault("FASTEMBED_CACHE_DIR", cache_root)
-
-    os.environ.setdefault("HF_HOME", "/tmp/hf")
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "/tmp/hf/hub")
-    os.environ.setdefault("TRANSFORMERS_CACHE", "/tmp/hf/transformers")
-
-
-def _make_embedder() -> TextEmbedding:
-    _configure_fastembed_cache()
-    model_name = os.getenv("EMBED_MODEL") or "qdrant/all-MiniLM-L6-v2-onnx"
-    return TextEmbedding(model_name=model_name)
-
-
-def _get_embedder() -> TextEmbedding:
-    global _EMB
-    if _EMB is None:
-        print("[embed] Initializing embedder (lazy)")
-        _EMB = _make_embedder()
-        print("[embed] Embedder initialized OK")
-    return _EMB
-
-
-def _clean_text(s: str) -> str:
-    return "".join(ch for ch in s if ch == "\n" or ch == "\t" or ord(ch) >= 32)
-
-
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    (RAG local) À l'origine: corpus de chunks pour index faiss.
+    Sans RAG, on peut encore l'utiliser pour décider de tronquer proprement.
+    """
     items: List[Dict[str, str]] = []
     if doc.get("title"):
         items.append({"id": "title", "text": doc["title"]})
@@ -132,44 +109,6 @@ def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
         for k, ch in enumerate(_chunk_text_sentence_safe(doc["abstract"])):
             items.append({"id": f"abs_{k}", "text": ch})
     return items
-
-
-def _build_index(chunks: List[Dict[str, str]]):
-    # lazy import: évite de casser tout le projet si faiss n'est pas dispo sur Vercel
-    import faiss  # type: ignore
-
-    emb = _get_embedder()
-    vecs = list(emb.embed([c["text"] for c in chunks]))
-    X = np.vstack(vecs).astype("float32")
-    faiss.normalize_L2(X)
-    idx = faiss.IndexFlatIP(X.shape[1])
-    idx.add(X)
-    return idx, X
-
-
-def _retrieve(idx, X, chunks, query: str, top_k=5) -> List[Dict[str, str]]:
-    import faiss  # type: ignore
-
-    emb = _get_embedder()
-    qv = np.array(list(emb.embed([query]))[0], dtype="float32")
-    faiss.normalize_L2(qv.reshape(1, -1))
-
-    D, I = idx.search(qv.reshape(1, -1), top_k)
-
-    seen = set()
-    selected: List[int] = []
-    for i in I[0]:
-        if i < 0 or i >= len(chunks):
-            continue
-        if i in seen:
-            continue
-        seen.add(i)
-        selected.append(i)
-        if len(selected) >= top_k:
-            break
-
-    selected_sorted = sorted(selected)
-    return [chunks[i] for i in selected_sorted]
 
 
 # ---------------------------------------------------------------------
@@ -245,10 +184,6 @@ def _cache_set(key, payload):
 # Hugging Face "chat" helpers (messages -> prompt)
 # ---------------------------------------------------------------------
 def _format_messages_for_hf(messages: List[Dict[str, str]]) -> str:
-    """
-    La Serverless Inference API est typiquement "text-generation": elle prend un seul prompt (string).
-    On concatène system/user avec un format simple et robuste.
-    """
     system_parts: List[str] = []
     user_parts: List[str] = []
     other_parts: List[str] = []
@@ -269,7 +204,6 @@ def _format_messages_for_hf(messages: List[Dict[str, str]]) -> str:
     user_txt = "\n\n".join(user_parts).strip()
     other_txt = "\n\n".join(other_parts).strip()
 
-    # Format instruct très classique :
     prompt = ""
     if system_txt:
         prompt += f"[SYSTEM]\n{system_txt}\n\n"
@@ -281,92 +215,13 @@ def _format_messages_for_hf(messages: List[Dict[str, str]]) -> str:
     return prompt
 
 
-async def _hf_generate(
-    prompt: str,
-    *,
-    max_new_tokens: int = 300,
-    temperature: float = 0.2,
-    do_sample: bool = False,
-    top_p: float = 0.95,
-) -> str:
-    """
-    Appel Hugging Face Serverless Inference API.
-    - Peut renvoyer 503 "model is loading" avec estimated_time.
-    - Certaines configs de modèles refusent certains paramètres: on reste minimal.
-    """
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN is missing (set it in env vars).")
+def _clean_text(s: str) -> str:
+    return "".join(ch for ch in s if ch == "\n" or ch == "\t" or ord(ch) >= 32)
 
-    payload: Dict[str, Any] = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": max_new_tokens,
-            "temperature": temperature,
-            "do_sample": do_sample,
-            "top_p": top_p,
-            "return_full_text": False,
-        },
-        "options": {
-            # Si True, HF attend que le modèle soit chargé (peut bloquer longtemps).
-            # En free tier c'est souvent préférable de gérer nous-mêmes le retry/backoff.
-            "wait_for_model": False
-        },
-    }
 
-    headers = _hf_headers()
-
-    # Retry simple si modèle en chargement (503 + {"estimated_time": ...})
-    max_wait_s = 45.0
-    start = time.perf_counter()
-
-    async with httpx.AsyncClient(timeout=_HF_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
-        while True:
-            r = await client.post(HF_BASE_URL, headers=headers, json=payload)
-
-            # Cas: modèle en chargement
-            if r.status_code == 503:
-                try:
-                    js = r.json()
-                except Exception:
-                    js = {}
-                est = float(js.get("estimated_time") or 2.0)
-                elapsed = time.perf_counter() - start
-                if elapsed + est > max_wait_s:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"HuggingFace model loading too long (>{max_wait_s}s). Try again.",
-                    )
-                sleep_s = max(1.0, min(est, 8.0))
-                print(f"[hf] Model loading. Retry in {sleep_s:.1f}s (estimated_time={est})")
-                await asyncio_sleep(sleep_s)
-                continue
-
-            # Auth / quota / erreurs
-            if r.status_code >= 400:
-                try:
-                    err = r.json()
-                except Exception:
-                    err = {"error": r.text}
-                raise HTTPException(status_code=r.status_code, detail=err)
-
-            data = r.json()
-
-            # Formats fréquents:
-            # - [{"generated_text": "..."}]
-            # - {"generated_text": "..."} (plus rare)
-            # - {"error": "..."}
-            if isinstance(data, list) and data:
-                first = data[0] or {}
-                txt = first.get("generated_text")
-                if isinstance(txt, str):
-                    return txt
-            if isinstance(data, dict):
-                if isinstance(data.get("generated_text"), str):
-                    return data["generated_text"]
-                if data.get("error"):
-                    raise HTTPException(status_code=502, detail=data)
-
-            return json.dumps(data, ensure_ascii=False)
+async def asyncio_sleep(seconds: float) -> None:
+    import asyncio
+    await asyncio.sleep(seconds)
 
 
 async def _llm_chat(
@@ -399,7 +254,6 @@ async def _llm_chat(
             return _clean_text(msg).strip()
 
     return json.dumps(js, ensure_ascii=False)
-
 
 
 async def _llm_chat_stream(
@@ -454,13 +308,6 @@ async def _llm_chat_stream(
                 chunk = _clean_text(delta)
                 if chunk:
                     yield chunk
-
-
-async def asyncio_sleep(seconds: float) -> None:
-    # petite helper pour éviter d'importer asyncio en global si tu veux minimal
-    import asyncio
-
-    await asyncio.sleep(seconds)
 
 
 # ---------------------------------------------------------------------
@@ -530,7 +377,6 @@ async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
     ]
 
     corrected = cond
-    synonyms_clean: List[str] = []
 
     try:
         raw = await _llm_chat(messages_txt, max_tokens=64, temperature=0.0)
@@ -543,22 +389,14 @@ async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
                 if value:
                     corrected = value
 
-        print(f"[cond-llm] parsed corrected='{corrected}', synonyms={synonyms_clean}")
+        print(f"[cond-llm] parsed corrected='{corrected}'")
 
     except Exception as e_txt:
         print("[cond-llm] ERREUR sur le TEXT mode")
         print(f"Exception: {type(e_txt).__name__}: {e_txt}")
         traceback.print_exc()
 
-    # Query finale (ici, pas de synonyms)
-    terms: List[str] = []
-    if corrected:
-        terms.append(corrected)
-
-    if not terms:
-        query = cond
-    else:
-        query = terms[0]
+    query = corrected or cond
 
     payload = {
         "corrected": corrected or cond,
@@ -732,6 +570,12 @@ async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
 ):
+    """
+    Version SANS RAG local:
+    - On récupère l'article (title+abstract)
+    - On envoie directement l'abstract (ou un chunkage simple) au LLM HF
+    - Pas d'embeddings, pas de FAISS => beaucoup plus léger pour Vercel
+    """
     print("\n========== [/explore_stream] ==========")
     print(f"[explore_stream] pmid reçu: {repr(pmid)}, plant={repr(plant)}")
 
@@ -745,7 +589,6 @@ async def explore_stream(
         async def gen_empty():
             yield "No abstract found.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
         return StreamingResponse(gen_empty(), media_type="text/plain")
 
     a = arts[0]
@@ -757,34 +600,40 @@ async def explore_stream(
         "year": a.get("year", ""),
     }
 
+    # (RAG local) On gardait des chunks + retrieval. Maintenant on fait juste un contexte simple.
+    # On garde un chunkage "safe" pour éviter d'envoyer un abstract énorme.
     chunks = _make_corpus(doc)
     if not chunks:
         async def gen_no_abs():
             yield "No abstract text available.\n"
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
-    query = f"Key findings and limitations of: {doc['title']}"
-
-    try:
-        idx, X = _build_index(chunks)
-        top = _retrieve(idx, X, chunks, query, top_k=5)
-        context = "\n".join(f"{t['text']}" for t in top)
-    except Exception as e:
-        print(f"[explore_stream] RAG failed, fallback to full abstract: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        context = (doc.get("abstract") or doc.get("title") or "")[:6000]
+    # --- CONTEXT (no-RAG) ---
+    # Strategy:
+    # - include title
+    # - include first N chunks of abstract (deterministic)
+    # - truncate to a safe max
+    max_chars = 6000
+    parts: List[str] = []
+    if doc["title"]:
+        parts.append(f"TITLE: {doc['title']}")
+    # add up to first 6 abstract chunks (tweak if needed)
+    abs_chunks = [c["text"] for c in chunks if c["id"].startswith("abs_")]
+    for ch in abs_chunks[:6]:
+        parts.append(ch)
+    context = "\n".join(parts)
+    context = context[:max_chars]
 
     raw_plant = (plant or "").strip()
     if raw_plant:
-        parts = [p.strip() for p in raw_plant.split(",") if p.strip()]
-        if len(parts) == 1:
-            plant_for_prompt = parts[0]
-        elif len(parts) == 2:
-            plant_for_prompt = " and ".join(parts)
+        parts_pl = [p.strip() for p in raw_plant.split(",") if p.strip()]
+        if len(parts_pl) == 1:
+            plant_for_prompt = parts_pl[0]
+        elif len(parts_pl) == 2:
+            plant_for_prompt = " and ".join(parts_pl)
         else:
-            plant_for_prompt = ", ".join(parts[:-1]) + " and " + parts[-1]
+            plant_for_prompt = ", ".join(parts_pl[:-1]) + " and " + parts_pl[-1]
     else:
         plant_for_prompt = "all plants mentioned in the CONTEXT"
 
@@ -797,7 +646,7 @@ async def explore_stream(
                 year=doc["year"],
                 journal=doc["journal"],
                 context=context,
-                pmid_study=pmid,
+                pmid_study=pmid,  # (note: pas utilisé dans le template actuellement)
                 plant=plant_for_prompt,
             ),
         },
