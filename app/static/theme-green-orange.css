@@ -1,61 +1,72 @@
-/* ===== Natural Therapeutics — Tela-inspired Green/Orange (light) + Icons + Pale Flower BG ===== */
+/* ===== Natural Therapeutics — Modern Pale Glass UI (ChatGPT-like typography) ===== */
+
 :root{
   /* Surfaces & texte */
-  --bg: #f6faf6;
-  --surface: #ffffff;
-  --card: #ffffff;
-  --text: #263128;
-  --muted: #5b6d61;
-  --border: #d9e7de;
+  --bg: #f9fbfa;
+  --text: #3a3f3c;          /* gris doux */
+  --muted: #7a847f;
+  --border: #e6efea;
 
-  /* Accents */
-  --green-1:#357b49;
-  --green-2:#00d084;
-  --green-3:#7bdcb5;
-  --orange-1:#ff6900;
-  --orange-2:#ff8a33;
-  --orange-3:#ffb56b;
+  /* Accents très pâles */
+  --green-1:#6f9f85;
+  --green-2:#b9e4d0;
+  --green-3:#dff4ea;
 
-  --ring: 0 0 0 3px rgba(255,105,0,.28);
+  --orange-1:#e8b78c;
+  --orange-2:#f2d4b8;
+  --orange-3:#f7e7d9;
+
+  /* UI */
+  --ring: 0 0 0 3px rgba(185,228,208,.45);
   --radius: 14px;
-  --shadow: 0 6px 22px rgba(17, 35, 26, .08);
+  --shadow: 0 6px 18px rgba(0,0,0,.06);
 }
 
-/* ====== SVG DATA-URIs (icônes & motif fleur) — one-line safe ====== */
+/* ===== SVG DATA-URIs ===== */
 :root{
-  /* Feuille (H1) */
-  --ico-leaf: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path fill='%2300d084' d='M41 7c-10 1-18 5-24 11S5 33 7 41c8 2 23-5 29-10S44 17 41 7z'/><path fill='none' stroke='%23214233' stroke-opacity='.18' stroke-width='2' d='M10 38c10-10 18-18 30-30'/></svg>");
+  --ico-leaf: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path fill='%23b9e4d0' d='M41 7c-10 1-18 5-24 11S5 33 7 41c8 2 23-5 29-10S44 17 41 7z'/></svg>");
 
-  /* Loupe (bouton Search) */
   --ico-mortar: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='11' cy='11' r='6' fill='none' stroke='%23ffffff' stroke-width='2.2'/><line x1='15' y1='15' x2='20' y2='20' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round'/></svg>");
 
-  /* Étoile/feuille (badge) */
-  --ico-badge: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path fill='%23ff8a33' d='M24 6l4.6 9.4 10.4 1.5-7.5 7.3 1.8 10.3L24 30l-9.3 4.9 1.8-10.3-7.5-7.3 10.4-1.5L24 6z'/></svg>");
+  --ico-badge: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><circle cx='24' cy='24' r='12' fill='%23f2d4b8'/></svg>");
 
-  /* Page (liens PubMed) */
-  --ico-paper: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><rect x='10' y='8' width='28' height='32' rx='4' fill='%23eaf5ef' stroke='%23cfe7da'/><rect x='14' y='14' width='20' height='2' fill='%23357b49'/><rect x='14' y='20' width='16' height='2' fill='%23357b49'/><rect x='14' y='26' width='18' height='2' fill='%23357b49'/></svg>");
+  --ico-paper: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><rect x='10' y='8' width='28' height='32' rx='4' fill='%23f4faf7' stroke='%23e6efea'/></svg>");
 
-  /* Chevron (select année) */
-  --ico-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='none' stroke='%23357b49' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/></svg>");
-
-  /* Motif “fleur pâle” (fond) */
-  --bg-flower: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='280' height='280' viewBox='0 0 280 280'><defs><radialGradient id='petal' cx='50%25' cy='50%25' r='50%25'><stop offset='0%25' stop-color='%23fff7e6' stop-opacity='.80'/><stop offset='100%25' stop-color='%23ffe9d6' stop-opacity='.15'/></radialGradient></defs><g opacity='.35' transform='translate(140 140)'><ellipse rx='60' ry='30' fill='url(%23petal)' transform='rotate(0)'/><ellipse rx='60' ry='30' fill='url(%23petal)' transform='rotate(45)'/><ellipse rx='60' ry='30' fill='url(%23petal)' transform='rotate(90)'/><ellipse rx='60' ry='30' fill='url(%23petal)' transform='rotate(135)'/><circle r='16' fill='%23ffedd8' stroke='%23ffd7a8' stroke-opacity='.4'/></g></svg>");
+  --ico-chevron: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='none' stroke='%236f9f85' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' d='M6 9l6 6 6-6'/></svg>");
 }
 
-/* Page */
-html,body{ height:auto; }
+/* ===== Base / Typography (ChatGPT-like) ===== */
+html { font-size: 16px; }
+html, body { height: auto; }
+
 body{
   position: relative;
-  min-height: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji";
+
+  /* ChatGPT-like system font stack */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+               Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", sans-serif;
+
+  font-weight: 400;
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+
   color: var(--text);
   background: var(--bg);
+
+  /* lecture confortable comme une app */
   max-width: 920px;
   margin: 28px auto;
   padding: 0 16px 48px;
+
+  /* taille fluide */
+  font-size: clamp(15px, 0.35vw + 14px, 17px);
+
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* BACKGROUND IMAGE pleine page, non répétée, 20% d'opacité */
+/* BACKGROUND IMAGE pleine page */
 body::before{
   content: "";
   position: fixed;
@@ -65,20 +76,27 @@ body::before{
   background-size: cover;
   background-repeat: no-repeat;
   background-position: center center;
-  opacity: 0.20;
+  opacity: 0.08;
   pointer-events: none;
 }
+
+/* Rhythm */
+p{ margin: 0.55em 0 1em; }
+strong{ font-weight: 600; }
+em{ font-style: italic; }
 
 /* Headings */
 h1{
   position: relative;
-  line-height:1.15;
-  font-size: clamp(26px, 3.6vw, 38px);
   margin: 0 0 10px;
+
+  font-weight: 700;
+  font-size: clamp(28px, 3vw, 36px);
+  line-height: 1.22;
+  letter-spacing: -0.02em;
+
   color: var(--green-1);
-  font-weight:800;
-  letter-spacing:.2px;
-  padding-left: 44px; /* espace pour l’icône */
+  padding-left: 44px;
 }
 h1::before{
   content:"";
@@ -88,7 +106,7 @@ h1::before{
   background-image: var(--ico-leaf);
   background-size: 100% 100%;
   background-repeat: no-repeat;
-  filter: drop-shadow(0 2px 4px rgba(0,0,0,.12));
+  filter: drop-shadow(0 2px 6px rgba(0,0,0,.10));
 }
 h1::after{
   content:"";
@@ -100,87 +118,88 @@ h1::after{
   background: linear-gradient(90deg, var(--green-2), var(--orange-1));
   opacity:.9;
 }
+
+h2{
+  color: var(--text);
+  font-weight: 650;
+  font-size: clamp(20px, 1.8vw, 24px);
+  line-height: 1.35;
+  margin: 26px 0 10px;
+  letter-spacing: -0.015em;
+}
+
 h3{
-  color:#1f2a22;
+  color: var(--text);
+  font-weight: 650;
   font-size: 18px;
-  margin-top:0;
+  line-height: 1.4;
+  margin-top: 0;
 }
 
 /* Helper text */
-.muted{ color: var(--muted); font-size: 13px; }
+.muted{
+  color: var(--muted);
+  font-size: 0.92em;
+}
 
+/* ===== Layout ===== */
 .row{
   display:flex;
-  flex-direction: column;  /* éléments empilés : input, select, bouton */
-  gap: 8px;
-  margin:16px 0 10px;
+  flex-direction: column;
+  gap: 10px;
+  margin: 16px 0 12px;
 }
 
-/* La zone de saisie prend toute la largeur */
-.row input#cond{
-  width: 100%;
-}
+.row input#cond{ width: 100%; }
 
-/* Ligne sous l'input : label + select + bouton alignés à droite */
 .row-actions{
-  display: flex;
-  align-items: center;
-  justify-content: flex-end; /* tout collé à droite */
-  gap: 8px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap: 10px;
 }
 
-/* Petit label "Start from" */
 .start-label{
-  font-size: 16px;
+  font-size: 0.98em;
   color: var(--muted);
   white-space: nowrap;
 }
 
-/* On retrouve la largeur "compacte" pour la boîte d'année */
-.row-actions select#fromYear{
-  width: 130px;   /* comme avant (≈ flex: 0 0 130px) */
-}
+.row-actions select#fromYear{ width: 130px; }
+.row-actions button#btn{ width: auto; }
 
-/* Le bouton Search garde sa taille auto (pas plein écran) */
-.row-actions button#btn{
-  width: auto;
-}
-
-
-/* Responsive */
 @media (max-width: 560px){
   body{ padding: 0 12px 36px; }
-  /* plus besoin de changer la direction ici,
-     elle est déjà en colonne par défaut */
+  .row-actions{ flex-wrap: wrap; justify-content: flex-start; }
+  .row-actions select#fromYear{ width: 140px; }
 }
 
-/* Inputs */
+/* ===== Inputs ===== */
 input{
-  flex:1;
   padding: 12px 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
-  background: #fbfdfb;
-  color: #1f2a22;
-  transition: border-color .2s ease, box-shadow .2s ease, transform .08s ease;
+  background: rgba(255,255,255,0.92);
+  color: var(--text);
+  transition: border-color .2s ease, box-shadow .2s ease, transform .08s ease, background-color .15s ease;
 }
-input::placeholder{ color:#7f9488; }
+input::placeholder{ color:#8e9892; }
 input:focus{
-  outline: none;
-  border-color: var(--green-3);
+  outline:none;
+  border-color: var(--green-2);
   box-shadow: var(--ring);
   transform: translateY(-1px);
 }
 
-/* Select (année de départ) */
+/* ===== Select ===== */
 select,
 select#fromYear{
-  padding: 12px 36px 12px 14px; /* place pour la flèche à droite */
+  padding: 12px 36px 12px 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
-  background-color: #fbfdfb;
-  color: #1f2a22;
-  font-size: 14px;
+  background-color: rgba(255,255,255,0.92);
+  color: var(--text);
+  font-size: 0.95em;
   line-height: 1.2;
   cursor: pointer;
   transition: border-color .2s ease, box-shadow .2s ease, transform .08s ease, background-color .15s ease;
@@ -194,45 +213,39 @@ select#fromYear{
   background-position: right 12px center;
   background-size: 16px 16px;
 }
-
 select#fromYear:focus{
-  outline: none;
-  border-color: var(--green-3);
+  outline:none;
+  border-color: var(--green-2);
   box-shadow: var(--ring);
   transform: translateY(-1px);
 }
-
 select#fromYear:hover{
-  background-color: #f3faf6;
+  background-color: rgba(255,255,255,0.98);
 }
 
-/* Button (style de base pour tous les boutons) */
+/* ===== Buttons ===== */
 button{
   position: relative;
   padding: 12px 18px;
   border: 0;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, var(--green-1), var(--green-2));
+  background: #9ccbb4;
   color:#ffffff;
-  font-weight: 700;
+  font-weight: 650;
   cursor: pointer;
   box-shadow: var(--shadow);
   transition: transform .08s ease, filter .15s ease, box-shadow .15s ease, background .2s ease;
   white-space: nowrap;
 }
-
 button:hover{
-  filter: brightness(1.04);
-  background: linear-gradient(135deg, var(--green-1), var(--orange-1));
+  background: #88bda5;
+  filter: brightness(1.02);
 }
 button:active{ transform: translateY(1px) scale(.99); }
-button:focus-visible{ outline:none; box-shadow: 0 0 0 3px rgba(0,208,132,.28); }
+button:focus-visible{ outline:none; box-shadow: 0 0 0 3px rgba(185,228,208,.45); }
 
-/* Bouton principal "Search" – icône loupe + padding gauche plus large */
-button#btn{
-  padding: 12px 18px 12px 56px; /* texte décalé à droite pour laisser la loupe */
-}
-
+/* Bouton Search – icône loupe */
+button#btn{ padding: 12px 18px 12px 56px; }
 button#btn::before{
   content:"";
   position:absolute;
@@ -241,81 +254,101 @@ button#btn::before{
   width:20px;
   height:20px;
   transform: translateY(-50%);
-  background-image: var(--ico-mortar); /* la loupe */
+  background-image: var(--ico-mortar);
   background-size: 100% 100%;
   background-repeat: no-repeat;
-  filter: drop-shadow(0 1px 2px rgba(0,0,0,.12));
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,.10));
 }
 
-/* Boutons secondaires "Use AI to explore" */
-/* Boutons secondaires "Use AI to explore" */
+/* Boutons IA */
 button.ai-btn{
   padding: 6px 12px;
   border-radius: 999px;
-  border: 1px solid rgba(255,105,0,.35); /* léger contour orange */
-  background: #fff5ec;                   /* orange très léger */
-  color: #8a4a20;                        /* texte orange/brun lisible */
-  font-size: 13px;
-  font-weight: 500;
+  border: 1px solid rgba(232,183,140,.45);
+  background: rgba(255,255,255,0.78);
+  color: #6a5a4f;
+  font-size: 0.9em;
+  font-weight: 550;
   box-shadow: none;
   white-space: nowrap;
-  background-image: none;                /* aucune icône */
+  background-image: none;
 }
-
 button.ai-btn:hover{
-  background: #fffaf5;                   /* encore plus pâle au survol */
-  border-color: rgba(255,105,0,.22);
+  background: rgba(255,255,255,0.92);
+  border-color: rgba(232,183,140,.28);
   filter: none;
 }
-
-
 button.ai-btn:disabled{
   opacity: .6;
   cursor: not-allowed;
 }
 
-/* Cards */
-.card{
+/* ===== Search banner ===== */
+.search-banner{
+  background: rgba(255,255,255,0.74);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: .75rem;
+  padding: .7rem .9rem;
+  margin: .75rem 0 .55rem;
+  font-size: 1.02rem;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  backdrop-filter: blur(8px);
+}
+
+/* ===== Cards (glass) ===== */
+.card{
+  border: 1px solid rgba(230,239,234,.95);
+  border-radius: calc(var(--radius) + 2px);
   padding: 18px;
   margin: 14px 0;
-  background:
-    linear-gradient(180deg, rgba(255,181,107,.08), rgba(123,220,181,.06)),
-    var(--card);
+
+  background: rgba(255,255,255,0.75);
+  backdrop-filter: blur(8px);
+
   box-shadow: var(--shadow);
-  transition: transform .12s ease, box-shadow .2s ease, border-color .2s ease, background-color .2s ease;
+  transition: transform .12s ease, box-shadow .2s ease, border-color .2s ease;
 }
 .card:hover{
-  transform: translateY(-2px);
-  box-shadow: 0 12px 32px rgba(17, 35, 26, .12);
-  border-color: #cfe7da;
+  transform: translateY(-1px);
+  box-shadow: 0 10px 26px rgba(0,0,0,.07);
+  border-color: rgba(210,226,218,.95);
 }
 
-/* Badge (score) */
-/* Badge (score) */
+/* Bloc "About this condition" un poil plus opaque pour la lisibilité */
+#diseaseSummary.card{
+  background: rgba(255,255,255,0.82);
+  backdrop-filter: blur(10px);
+}
 
-.badge{
+/* Fond légèrement transparent pour le texte de la maladie */
+#diseaseSummaryText{
+  position: relative;
+  background: rgba(255,255,255,0.55);
+  border: 1px solid rgba(230,239,234,.95);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 12px 0 6px;
+  backdrop-filter: blur(6px);
+}
+
+/* Badge */
+.card .badge{
   position: relative;
   display:inline-flex;
   align-items:center;
-  gap:6px;
-  border:1px solid rgba(53,123,73,.2);
+  padding: 2px 12px 2px 46px;
   border-radius: 999px;
-  padding: 2px 12px 2px 44px; /* plus d'espace à gauche pour l'icône */
-  font-size:12px;
-  margin-left:10px;
-  color:#214233;
-  background:
-    linear-gradient(90deg, rgba(255,105,0,.10), rgba(0,208,132,.10)),
-    #f3faf6;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.6);
+  border: 1px solid rgba(230,239,234,.95);
+  background: rgba(244,250,247,0.86);
+  font-size: 12px;
+  margin-left: 10px;
+  color:#2f3a35;
 }
-
-.badge::before{
+.card .badge::before{
   content:"";
   position:absolute;
-  left:14px;            /* un peu plus à droite */
+  left:16px;
   top:50%;
   width:16px;
   height:16px;
@@ -325,31 +358,17 @@ button.ai-btn:disabled{
   background-repeat: no-repeat;
 }
 
-.chip{
-  display:inline-block;
-  margin:6px 6px 0 0;
-  padding:2px 8px;
-  font-size:12px;
-  border-radius:999px;
-  text-decoration:none;
-  color:#214233;
-  background:#f3faf6;
-  border:1px solid rgba(53,123,73,.2);
-}
-.chip:hover{ filter:brightness(1.05); }
-
-.pmids .links{ margin-top:4px; }
-
-/* Liens vers PubMed */
+/* PubMed links */
 .pmids a{
   position: relative;
   display:block;
-  margin:6px 0 0;
-  padding-left: 28px; /* place pour icône */
-  color:#1d5336;
+  margin: 8px 0 0;
+  padding-left: 28px;
+  color:#40695a;
   text-decoration: none;
   border-left: 3px solid transparent;
-  transition: color .15s ease, border-color .15s ease, background-color .15s ease, transform .08s ease, padding-left .15s ease;
+  border-radius: 10px;
+  transition: color .15s ease, border-color .15s ease, background-color .15s ease, padding-left .15s ease;
 }
 .pmids a::before{
   content:"";
@@ -362,121 +381,114 @@ button.ai-btn:disabled{
   background-image: var(--ico-paper);
   background-size: 100% 100%;
   background-repeat: no-repeat;
-  opacity:.9;
+  opacity:.85;
 }
 .pmids a:hover{
-  color:#143a27;
+  color:#2e5a49;
   border-color: var(--green-2);
-  background: rgba(0,208,132,.08);
+  background: rgba(185,228,208,0.22);
   padding-left: 32px;
 }
-
-/* Ligne de journal */
 .pmids .muted{
   margin-top: -2px;
-  color:#6b8577;
+  color:#8a938d;
+}
+
+/* Typewriter lines */
+.tw-line{
+  opacity: 0;
+  transform: translateY(0.25em);
+}
+.tw-line-visible{
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.4s ease-out, transform 0.4s ease-out;
 }
 
 /* Footer */
 footer{
   margin-top: 22px;
-  font-size: 12px;
+  font-size: 0.9em;
   color: var(--muted);
   border-top: 1px solid var(--border);
   padding-top: 14px;
-  opacity: .95;
 }
 
-/* Responsive
-@media (max-width: 560px){
-  body{ padding: 0 12px 36px; }
-  .row{ flex-direction: column; }
-  button{ width: 100%; }
-  .row select#fromYear{
-    width: 100%;
-  }
-} */
-
-/* Accessibilité */
+/* Accessibility */
 :focus-visible{
-  outline: 2px dashed var(--orange-1);
+  outline: 2px dashed var(--green-1);
   outline-offset: 2px;
 }
 
+/* ===== About this condition: collapsible summary ===== */
 
-/* === Fix badge de score : icône + texte bien séparés, override total === */
-.card .badge{
-  position: relative !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  gap: 6px !important;
-
-  /* beaucoup d'espace avant le texte pour l'icône */
-  padding: 2px 12px 2px 46px !important;
-
-  margin-left: 10px !important;
-  border-radius: 999px !important;
-  border: 1px solid rgba(53,123,73,.2) !important;
-
-  background:
-    linear-gradient(90deg, rgba(255,105,0,.10), rgba(0,208,132,.10)),
-    #f3faf6 !important;
-
-  font-size: 12px !important;
-  color: #214233 !important;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.6) !important;
+.summary-wrap{
+  margin-top: 10px;
 }
 
-.card .badge::before{
-  content: "" !important;
-  position: absolute !important;
-  left: 16px !important;        /* position de l'icône */
-  top: 50% !important;
-  width: 16px !important;
-  height: 16px !important;
-  transform: translateY(-50%) !important;
-
-  background-image: var(--ico-badge) !important;
-  background-size: 100% 100% !important;
-  background-repeat: no-repeat !important;
+/* Vue "collapsed" : 3 lignes max + ellipsis */
+.summary-plain{
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;   /* ✅ 3 lignes */
+  overflow: hidden;
+  white-space: normal;
 }
 
-.search-banner {
-    background: #ffffff;
-    border: 1px solid #dddddd;
-    border-radius: .5rem;
-    padding: .6rem .9rem;
-    margin: .75rem 0 .5rem;
-    font-size: 1.05rem;          /* typo un peu plus grande */
-    color: #333;
-    box-shadow: 0 1px 3px rgba(0,0,0,.04);
-  }
-
-  .search-banner-label {
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    font-size: .8rem;
-    color: #888;
-    margin-right: .35rem;
-  }
-
-  .search-banner strong {
-    font-weight: 600;            /* maladie corrigée bien en gras */
-  }
-
-  #diseaseSummaryText {
-  position: relative;
+/* Vue "expanded" : HTML complet */
+.summary-rich{
+  display: none;
 }
 
-/* Ligne ajoutée progressivement */
-.tw-line {
-  opacity: 0;
-  transform: translateY(0.25em);
+/* Bouton ... + flèche */
+.summary-toggle{
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 6px 10px;
+  border-radius: 999px;
+
+  border: 1px solid rgba(230,239,234,.95);
+  background: rgba(255,255,255,0.70);
+  color: var(--muted);
+
+  cursor: pointer;
+  font-size: 0.92em;
+  font-weight: 600;
+
+  backdrop-filter: blur(6px);
 }
 
-/* Quand la ligne est rendue visible */
-.tw-line-visible {
-  opacity: 1;
-  transform: translateY(0);
-  transition: opacity 0.4s ease-out, transform 0.4s ease-out;
+.summary-toggle:hover{
+  background: rgba(255,255,255,0.86);
 }
+
+/* Petite flèche (chevron) */
+.summary-toggle .chev{
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform .18s ease;
+}
+
+/* En mode expanded, flèche vers le haut */
+#diseaseSummary[data-expanded="true"] .summary-toggle .chev{
+  transform: rotate(-135deg);
+}
+
+/* Switch view */
+#diseaseSummary[data-expanded="true"] .summary-plain{
+  display: none;
+}
+#diseaseSummary[data-expanded="true"] .summary-rich{
+  display: block;
+}
+
+/* Bonus: réduire le spacing interne du HTML */
+.summary-rich p{ margin: 0.45em 0 0.85em; }
+.summary-rich li{ margin: 0.25em 0; }
