@@ -565,25 +565,142 @@ async def recommendations(
     return payload
 
 
+# @router.get("/explore_stream")
+# async def explore_stream(
+#     pmid: str = Query(..., min_length=1),
+#     plant: Optional[str] = Query(None, min_length=1),
+# ):
+#     """
+#     Version SANS RAG local:
+#     - On récupère l'article (title+abstract)
+#     - On envoie directement l'abstract (ou un chunkage simple) au LLM HF
+#     - Pas d'embeddings, pas de FAISS => beaucoup plus léger pour Vercel
+#     """
+#     print("\n========== [/explore_stream] ==========")
+#     print(f"[explore_stream] pmid reçu: {repr(pmid)}, plant={repr(plant)}")
+
+#     t0 = time.perf_counter()
+#     async with httpx.AsyncClient(timeout=_HF_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False) as http:
+#         arts = await efetch(http, [pmid])
+#     t1 = time.perf_counter()
+#     print(f"[explore_stream] efetch terminé, durée={t1-t0:.2f}s, nb_arts={len(arts)}")
+
+#     if not arts:
+#         async def gen_empty():
+#             yield "No abstract found.\n"
+#             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+#         return StreamingResponse(gen_empty(), media_type="text/plain")
+
+#     a = arts[0]
+#     doc = {
+#         "pmid": pmid,
+#         "title": a.get("title", ""),
+#         "abstract": a.get("abstract", ""),
+#         "journal": a.get("journal", ""),
+#         "year": a.get("year", ""),
+#     }
+
+#     # (RAG local) On gardait des chunks + retrieval. Maintenant on fait juste un contexte simple.
+#     # On garde un chunkage "safe" pour éviter d'envoyer un abstract énorme.
+#     chunks = _make_corpus(doc)
+#     if not chunks:
+#         async def gen_no_abs():
+#             yield "No abstract text available.\n"
+#             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+#         return StreamingResponse(gen_no_abs(), media_type="text/plain")
+
+#     # --- CONTEXT (no-RAG) ---
+#     # Strategy:
+#     # - include title
+#     # - include first N chunks of abstract (deterministic)
+#     # - truncate to a safe max
+#     max_chars = 6000
+#     parts: List[str] = []
+#     if doc["title"]:
+#         parts.append(f"TITLE: {doc['title']}")
+#     # add up to first 6 abstract chunks (tweak if needed)
+#     abs_chunks = [c["text"] for c in chunks if c["id"].startswith("abs_")]
+#     for ch in abs_chunks[:6]:
+#         parts.append(ch)
+#     context = "\n".join(parts)
+#     context = context[:max_chars]
+
+#     raw_plant = (plant or "").strip()
+#     if raw_plant:
+#         parts_pl = [p.strip() for p in raw_plant.split(",") if p.strip()]
+#         if len(parts_pl) == 1:
+#             plant_for_prompt = parts_pl[0]
+#         elif len(parts_pl) == 2:
+#             plant_for_prompt = " and ".join(parts_pl)
+#         else:
+#             plant_for_prompt = ", ".join(parts_pl[:-1]) + " and " + parts_pl[-1]
+#     else:
+#         plant_for_prompt = "all plants mentioned in the CONTEXT"
+
+#     messages = [
+#         {"role": "system", "content": _SYSTEM},
+#         {
+#             "role": "user",
+#             "content": _USER_TMPL.format(
+#                 title=doc["title"],
+#                 year=doc["year"],
+#                 journal=doc["journal"],
+#                 context=context,
+#                 pmid_study=pmid,  # (note: pas utilisé dans le template actuellement)
+#                 plant=plant_for_prompt,
+#             ),
+#         },
+#     ]
+
+#     async def event_generator():
+#         try:
+#             async for chunk in _llm_chat_stream(messages, max_tokens=300, temperature=0.0):
+#                 yield chunk
+#         except Exception as e:
+#             err = f"\n[ERROR] LLM call failed: {type(e).__name__}: {e}\n"
+#             print(err)
+#             traceback.print_exc()
+#             yield err
+
+#         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+#         yield refs
+
+#     return StreamingResponse(event_generator(), media_type="text/plain")
+
+
 @router.get("/explore_stream")
 async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
 ):
-    """
-    Version SANS RAG local:
-    - On récupère l'article (title+abstract)
-    - On envoie directement l'abstract (ou un chunkage simple) au LLM HF
-    - Pas d'embeddings, pas de FAISS => beaucoup plus léger pour Vercel
-    """
     print("\n========== [/explore_stream] ==========")
     print(f"[explore_stream] pmid reçu: {repr(pmid)}, plant={repr(plant)}")
 
-    t0 = time.perf_counter()
+    pub_id = f"pub_{pmid}"
+
+    # 1) Cache Turso
+    try:
+        cached = await get_resume_by_pub_id(pub_id)
+    except Exception as e:
+        print(f"[turso] cache read failed: {type(e).__name__}: {e}")
+        cached = None
+
+    if cached:
+        # increment searched (best-effort)
+        try:
+            await increment_searched(pub_id)
+        except Exception as e:
+            print(f"[turso] increment failed: {type(e).__name__}: {e}")
+
+        async def gen_cached():
+            yield cached
+            yield f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+
+        return StreamingResponse(gen_cached(), media_type="text/plain")
+
+    # 2) Sinon: ton flux actuel (efetch + LLM stream)
     async with httpx.AsyncClient(timeout=_HF_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT, trust_env=False) as http:
         arts = await efetch(http, [pmid])
-    t1 = time.perf_counter()
-    print(f"[explore_stream] efetch terminé, durée={t1-t0:.2f}s, nb_arts={len(arts)}")
 
     if not arts:
         async def gen_empty():
@@ -600,8 +717,6 @@ async def explore_stream(
         "year": a.get("year", ""),
     }
 
-    # (RAG local) On gardait des chunks + retrieval. Maintenant on fait juste un contexte simple.
-    # On garde un chunkage "safe" pour éviter d'envoyer un abstract énorme.
     chunks = _make_corpus(doc)
     if not chunks:
         async def gen_no_abs():
@@ -609,21 +724,14 @@ async def explore_stream(
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
-    # --- CONTEXT (no-RAG) ---
-    # Strategy:
-    # - include title
-    # - include first N chunks of abstract (deterministic)
-    # - truncate to a safe max
     max_chars = 6000
     parts: List[str] = []
     if doc["title"]:
         parts.append(f"TITLE: {doc['title']}")
-    # add up to first 6 abstract chunks (tweak if needed)
     abs_chunks = [c["text"] for c in chunks if c["id"].startswith("abs_")]
     for ch in abs_chunks[:6]:
         parts.append(ch)
-    context = "\n".join(parts)
-    context = context[:max_chars]
+    context = "\n".join(parts)[:max_chars]
 
     raw_plant = (plant or "").strip()
     if raw_plant:
@@ -639,30 +747,40 @@ async def explore_stream(
 
     messages = [
         {"role": "system", "content": _SYSTEM},
-        {
-            "role": "user",
-            "content": _USER_TMPL.format(
-                title=doc["title"],
-                year=doc["year"],
-                journal=doc["journal"],
-                context=context,
-                pmid_study=pmid,  # (note: pas utilisé dans le template actuellement)
-                plant=plant_for_prompt,
-            ),
-        },
+        {"role": "user", "content": _USER_TMPL.format(
+            title=doc["title"],
+            year=doc["year"],
+            journal=doc["journal"],
+            context=context,
+            pmid_study=pmid,
+            plant=plant_for_prompt,
+        )},
     ]
 
     async def event_generator():
+        # Accumule pour sauvegarder dans Turso à la fin
+        buf_parts: List[str] = []
         try:
             async for chunk in _llm_chat_stream(messages, max_tokens=300, temperature=0.0):
+                buf_parts.append(chunk)
                 yield chunk
         except Exception as e:
             err = f"\n[ERROR] LLM call failed: {type(e).__name__}: {e}\n"
             print(err)
             traceback.print_exc()
             yield err
+            return
 
+        # Ajoute refs côté client (comme avant)
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
+
+        # Sauvegarde Turso (best-effort)
+        full_resume = "".join(buf_parts).strip()
+        if full_resume:
+            try:
+                await insert_resume(pub_id, full_resume)  # searched=1 via SQL
+            except Exception as e:
+                print(f"[turso] insert failed: {type(e).__name__}: {e}")
 
     return StreamingResponse(event_generator(), media_type="text/plain")
