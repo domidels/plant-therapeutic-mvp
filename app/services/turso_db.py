@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import os
 from typing import Optional
-from app.services.turso_db import get_resume_by_pub_id, increment_searched, insert_resume
-
 from libsql_client import create_client
+from app.core.config import settings
 
-TURSO_DATABASE_URL = os.getenv("TURSO_DATABASE_URL", "").strip()
-TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+TURSO_DATABASE_URL = getattr(settings, "TURSO_DATABASE_URL", None) or os.getenv("TURSO_DATABASE_URL", None)
+TURSO_AUTH_TOKEN = getattr(settings, "TURSO_AUTH_TOKEN", None) or os.getenv("TURSO_AUTH_TOKEN", None)
 
 def _check_cfg():
     if not TURSO_DATABASE_URL:

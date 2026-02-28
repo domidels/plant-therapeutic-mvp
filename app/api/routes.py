@@ -1,6 +1,6 @@
 # app/api/routes.py
 from __future__ import annotations
-
+from app.services.turso_db import get_resume_by_pub_id, increment_searched, insert_resume
 import json
 import os
 import time
@@ -8,7 +8,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
-
+from app.core.config import settings
 import httpx
 # import numpy as np  # (RAG local) plus nécessaire si on n'embarque plus embeddings+faiss sur Vercel
 from fastapi import APIRouter, HTTPException, Query
@@ -43,9 +43,10 @@ router = APIRouter()
 # ---------------------------------------------------------------------
 # Hugging Face Inference API config
 # ---------------------------------------------------------------------
-HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+HF_TOKEN= getattr(settings, "HF_TOKEN", None) or os.getenv("HF_TOKEN", "").strip()
 HF_BASE_URL = "https://router.huggingface.co/v1"
 HF_MODEL = os.getenv("HF_MODEL", "mistralai/Mistral-7B-Instruct-v0.2").strip()
+HF_MODEL="meta-llama/Llama-3.1-8B-Instruct"
 
 # Timeouts: l'API peut "cold start" (503 + estimated_time), donc read assez large.
 _HF_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
@@ -281,6 +282,9 @@ async def _llm_chat_stream(
             headers=headers,
             json=payload,
         ) as r:
+            if r.status_code >= 400:
+                raw = await r.aread()
+                print("[HF 400 BODY]", raw.decode("utf-8", errors="replace"))
             r.raise_for_status()
             async for line in r.aiter_lines():
                 if not line:
