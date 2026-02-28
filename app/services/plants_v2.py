@@ -19,7 +19,7 @@ NEGATIVE_KEYWORDS = {
     "toxicity", "toxic", "poisoning", "poison", "overdose",
     "induced liver injury", "liver injury", "hepatotoxicity",
     "harmful", "damage", "injury", "drug-induced",
-    "herb-induced", "herbal-induced",
+    "herb-induced", "herbal-induced","disorder", "death", "fatal"
 }
 
 # Contextes typiques du groupe contrôle/placebo
