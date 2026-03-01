@@ -402,7 +402,7 @@ async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
 
     fallback_system = (
         "You are a medical terminology assistant.\n"
-        "Your ONLY job is to correct spelling mistakes in a disease or condition name.\n"
+        "Your ONLY job is to correct spelling mistakes in a disease or condition name or to replace abbreviations with their full forms\n"
         "\n"
         "You MUST ALWAYS answer with EXACTLY ONE LINE in this format:\n"
         "CORRECTED: <best standard condition name in English>\n"
