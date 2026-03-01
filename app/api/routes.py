@@ -43,7 +43,7 @@ _session_secret_raw = getattr(settings, "SESSION_SECRET", None) or os.getenv("SE
 SESSION_SECRET: bytes = (_session_secret_raw or "change-me").encode("utf-8")
 
 HUMAN_COOKIE_NAME = "human_ok"
-HUMAN_COOKIE_TTL_SECONDS = 24 * 3600  # 24h
+HUMAN_COOKIE_TTL_SECONDS = 6 * 3600  # 24h
 
 
 class VerifyReq(BaseModel):
