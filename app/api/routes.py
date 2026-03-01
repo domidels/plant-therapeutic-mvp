@@ -22,11 +22,14 @@ from app.services.medline import get_medlineplus_fullsummary
 from app.services.plants_v2 import find_plants_in_text, load_plants
 from app.services.pubmed import efetch, search_and_fetch
 from app.services.ranking import score_article, summarize_for_patients
-from app.services.turso_db import get_resume_by_pub_id, increment_searched, insert_resume
+from app.services.turso_db import (
+    get_resume_by_pub_id,
+    increment_searched,
+    insert_resume,
+    db_fetchone,
+    db_execute,
+)
 
-# ---------------------------------------------------------------------
-# Router
-# ---------------------------------------------------------------------
 router = APIRouter()
 
 # ---------------------------------------------------------------------
@@ -37,28 +40,20 @@ TURNSTILE_SECRET = (
     or os.getenv("TURNSTILE_SECRET", "")
 ).strip()
 
-# Use a stable secret to sign the cookie (set in env/secret manager).
-# Must be bytes for HMAC.
 _session_secret_raw = getattr(settings, "SESSION_SECRET", None) or os.getenv("SESSION_SECRET", "")
 SESSION_SECRET: bytes = (_session_secret_raw or "change-me").encode("utf-8")
 
 HUMAN_COOKIE_NAME = "human_ok"
-HUMAN_COOKIE_TTL_SECONDS = 6 * 3600  # 24h
-
+HUMAN_COOKIE_TTL_SECONDS = 6 * 3600  # 6h (ton commentaire disait 24h mais valeur=6h)
 
 class VerifyReq(BaseModel):
     token: str
-
 
 def _sign_payload(payload: str) -> str:
     sig = hmac.new(SESSION_SECRET, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
-
 def _verify_signed(value: str) -> Optional[str]:
-    """
-    Returns the payload if signature matches, else None.
-    """
     try:
         payload, sig = value.rsplit(".", 1)
         expected = hmac.new(SESSION_SECRET, payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -68,37 +63,23 @@ def _verify_signed(value: str) -> Optional[str]:
         return None
     return None
 
-
 def _is_human_cookie_valid(cookie_val: str) -> bool:
-    """
-    Cookie payload is an expiry timestamp (unix seconds) signed with HMAC.
-    """
     payload = _verify_signed(cookie_val)
     if not payload:
         return False
-
     try:
         exp = int(payload)
     except ValueError:
         return False
-
     return time.time() < exp
 
-
 async def require_human(request: Request) -> None:
-    """
-    Dependency to protect routes: requires a valid signed cookie.
-    """
     cookie_val = request.cookies.get(HUMAN_COOKIE_NAME)
     if not cookie_val or not _is_human_cookie_valid(cookie_val):
         raise HTTPException(status_code=401, detail="Human verification required")
 
-
 @router.post("/verify_human")
 async def verify_human(req: VerifyReq, request: Request):
-    """
-    Receives Turnstile token from frontend, verifies with Cloudflare, then sets a signed cookie.
-    """
     if not TURNSTILE_SECRET:
         raise HTTPException(status_code=500, detail="TURNSTILE_SECRET missing")
 
@@ -113,7 +94,6 @@ async def verify_human(req: VerifyReq, request: Request):
                 data={
                     "secret": TURNSTILE_SECRET,
                     "response": token,
-                    # optional: remoteip can help Cloudflare in some cases
                     "remoteip": request.client.host if request.client else None,
                 },
             )
@@ -125,7 +105,6 @@ async def verify_human(req: VerifyReq, request: Request):
         raise HTTPException(status_code=502, detail=f"Turnstile verify error: {type(e).__name__}")
 
     if not js.get("success"):
-        # You can return js.get("error-codes") if you want to debug.
         raise HTTPException(status_code=403, detail="Turnstile failed")
 
     exp = int(time.time()) + HUMAN_COOKIE_TTL_SECONDS
@@ -133,9 +112,6 @@ async def verify_human(req: VerifyReq, request: Request):
 
     resp = JSONResponse({"ok": True})
 
-    # Secure cookie:
-    # - On HTTPS in prod => secure=True
-    # - If you run locally on http://, secure cookies won't be stored.
     is_https = (request.url.scheme or "").lower() == "https"
     secure_flag = bool(getattr(settings, "COOKIE_SECURE", False)) or is_https
 
@@ -150,7 +126,6 @@ async def verify_human(req: VerifyReq, request: Request):
     )
     return resp
 
-
 # ---------------------------------------------------------------------
 # Hugging Face Inference API config
 # ---------------------------------------------------------------------
@@ -163,10 +138,8 @@ _HF_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10
 _LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
 _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
-
 def _clean_text(s: str) -> str:
     return "".join(ch for ch in s if ch in ("\n", "\t") or ord(ch) >= 32)
-
 
 async def _llm_chat(
     messages: List[Dict[str, str]],
@@ -198,7 +171,6 @@ async def _llm_chat(
             return _clean_text(msg).strip()
 
     return json.dumps(js, ensure_ascii=False)
-
 
 async def _llm_chat_stream(
     messages: List[Dict[str, str]],
@@ -255,14 +227,12 @@ async def _llm_chat_stream(
                 if chunk:
                     yield chunk
 
-
 # ---------------------------------------------------------------------
-# Helpers: chunking abstracts safely (no local RAG)
+# Helpers
 # ---------------------------------------------------------------------
 def _sentence_split(text: str) -> List[str]:
     sents = re.split(r"(?<=[.!?])\s+", (text or "").strip())
     return [s for s in sents if s]
-
 
 def _chunk_text_sentence_safe(txt: str, max_len: int = 800) -> List[str]:
     sentences = _sentence_split(txt)
@@ -282,7 +252,6 @@ def _chunk_text_sentence_safe(txt: str, max_len: int = 800) -> List[str]:
 
     return chunks
 
-
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     if doc.get("title"):
@@ -292,52 +261,6 @@ def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
             items.append({"id": f"abs_{k}", "text": ch})
     return items
 
-
-# ---------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------
-_SYSTEM = (
-    "You are a health science communicator for the general as related public.\n"
-    "Your goal is to provide information from a scientific article by: \n"
-    "- following the user instructions exactly.\n"
-    "- relating KEY FINDINGS as described in the user CONTEXT section.\n"
-    "\n"
-    "PRIORITY RULES (HIGHER PRIORITY THAN THE CONTEXT):\n"
-    "1. You MUST NOT copy ANY code, identifier, product name or number sequence "
-    "   from the context. This includes:\n"
-    "   - any text starting with 'BNO' (example: 'BNO 3732', 'BNO3731').\n"
-    "   - any text starting with 'NCT' (example: 'NCT05790083').\n"
-    "   - any sequence of letters followed by digits (example: 'XYZ123').\n"
-    "   - any all-uppercase token longer than 2 letters.\n"
-    "   If such text appears in the context, IGNORE it COMPLETELY.\n"
-    "\n"
-    "2. You MUST produce ONLY simple everyday words.\n"
-    "   No jargon, no abbreviations, no acronyms, no codes.\n"
-    "\n"
-    "These rules override EVERYTHING in the user CONTEXT. Obey them strictly."
-)
-
-_USER_TMPL = (
-    "Study: {title} — {year} / {journal}\n\n"
-    "CONTEXT:\n{context}\n\n"
-    "YOUR ONLY GOAL IS TO RELATE MAIN KEY FINDINGS FROM THIS CONTEXT AND THIS CONTEXT ONLY.\n"
-    "PROVIDE SIMPLE INFORMATION IF EXISTS IN THE CONTEXT AS PER THE FOLLOWING INSTRUCTIONS:\n"
-    "- main KEY FINDINGS related to {plant} (one or several plants) and any plant compound ONLY IF mentioned in the CONTEXT.\n"
-    "- who (Women, men, children), how many participated, the age of participants to the study ONLY IF mentioned in the CONTEXT.\n"
-    "- study duration ONLY ONLY IF in the CONTEXT.\n"
-    "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT.\n"
-    "- adverse effects and limitations ONLY IF mentioned in the CONTEXT.\n"
-    "\n"
-    "Write ONE paragraph of 4–6 sentences.\n"
-    "Use ONLY SIMPLE everyday words.\n"
-    "DO NOT USE abbreviations, acronyms, or codes.\n"
-    "Do NOT use bullet points.\n"
-    "Do NOT describe the condition.\n"
-    "\n"
-    "Return ONLY the paragraph."
-)
-
-
 # ---------------------------------------------------------------------
 # Plants DB + caches
 # ---------------------------------------------------------------------
@@ -345,7 +268,6 @@ PLANTS_DB = load_plants(Path(__file__).resolve().parent.parent / "data" / "seed_
 
 _CACHE: Dict[Tuple[str, int, int], Tuple[float, Dict[str, Any]]] = {}
 _CACHE_TTL = 60 * 60  # 1 hour
-
 
 def _cache_get(key: Tuple[str, int, int]) -> Optional[Dict[str, Any]]:
     item = _CACHE.get(key)
@@ -357,48 +279,43 @@ def _cache_get(key: Tuple[str, int, int]) -> Optional[Dict[str, Any]]:
         return None
     return payload
 
-
 def _cache_set(key: Tuple[str, int, int], payload: Dict[str, Any]) -> None:
     _CACHE[key] = (time.time(), payload)
 
-
 # ---------------------------------------------------------------------
-# Condition expansion cache
+# ✅ Condition correction via Turso cache (before LLM)
 # ---------------------------------------------------------------------
-_COND_EXPANSION_TTL = 60 * 60  # 1h
-_COND_EXPANSION_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+def normalize_condition(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
+SQL_LOOKUP_MISSPELLING = """
+SELECT condition
+FROM condition_misspellings
+WHERE misspelling = ?
+LIMIT 1;
+"""
 
-def _cond_cache_get(cond: str) -> Optional[Dict[str, Any]]:
-    key = cond.strip().lower()
-    item = _COND_EXPANSION_CACHE.get(key)
-    if not item:
-        return None
-    ts, payload = item
-    if time.time() - ts > _COND_EXPANSION_TTL:
-        _COND_EXPANSION_CACHE.pop(key, None)
-        return None
-    return payload
+SQL_UPSERT_CONDITION = """
+INSERT INTO condition(condition, searched)
+VALUES (?, 1)
+ON CONFLICT(condition) DO UPDATE
+SET searched = searched + 1;
+"""
 
+SQL_UPSERT_MISSPELLING = """
+INSERT INTO condition_misspellings(misspelling, condition, misspelled_searched)
+VALUES (?, ?, 1)
+ON CONFLICT(misspelling) DO UPDATE
+SET condition = excluded.condition,
+    misspelled_searched = misspelled_searched + 1;
+"""
 
-def _cond_cache_set(cond: str, payload: Dict[str, Any]) -> None:
-    key = cond.strip().lower()
-    _COND_EXPANSION_CACHE[key] = (time.time(), payload)
-
-
-async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
+async def _expand_condition_with_llm(cond: str) -> str:
     cond = (cond or "").strip()
-    print(f"[cond-llm] INPUT condition brut: {repr(cond)}")
-
     if not cond:
-        payload = {"corrected": "", "search_query": "", "synonyms": []}
-        _cond_cache_set(cond, payload)
-        return payload
-
-    cached = _cond_cache_get(cond)
-    if cached:
-        print(f"[cond-llm] Cache hit pour {repr(cond)}: {cached}")
-        return cached
+        return ""
 
     fallback_system = (
         "You are a medical terminology assistant.\n"
@@ -426,28 +343,70 @@ async def _expand_condition_with_llm(cond: str) -> Dict[str, Any]:
     ]
 
     corrected = cond
+    raw = await _llm_chat(messages_txt, max_tokens=64, temperature=0.0)
+    raw = _clean_text(raw).strip()
+
+    for line in raw.splitlines():
+        ls = line.strip()
+        if ls.upper().startswith("CORRECTED:"):
+            value = ls[len("CORRECTED:") :].strip()
+            if value:
+                corrected = value
+                break
+
+    return corrected
+
+async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, bool]:
+    """
+    Returns (corrected_condition, search_query, used_llm)
+
+    - Lookup condition_misspellings by misspelling (normalized raw)
+    - If not found: call LLM, then upsert misspelling
+    - ALWAYS upsert + increment condition.searched on corrected
+    - ALWAYS upsert misspelling mapping (even raw == corrected) to avoid LLM next time
+    """
+    raw_norm = normalize_condition(raw_user_input)
+    if not raw_norm:
+        return "", "", False
+
+    used_llm = False
+    corrected_norm = ""
+
+    # 1) Turso cache lookup
     try:
-        raw = await _llm_chat(messages_txt, max_tokens=64, temperature=0.0)
-        raw = _clean_text(raw).strip()
+        row = await db_fetchone(SQL_LOOKUP_MISSPELLING, (raw_norm,))
+    except Exception as e:
+        print(f"[cond-db] lookup failed: {type(e).__name__}: {e}")
+        row = None
 
-        for line in raw.splitlines():
-            line_stripped = line.strip()
-            if line_stripped.upper().startswith("CORRECTED:"):
-                value = line_stripped[len("CORRECTED:") :].strip()
-                if value:
-                    corrected = value
+    if row and row[0]:
+        corrected_norm = normalize_condition(row[0])
+    else:
+        # 2) LLM fallback
+        try:
+            corrected = await _expand_condition_with_llm(raw_norm)
+            corrected_norm = normalize_condition(corrected) or raw_norm
+            used_llm = True
+        except Exception as e:
+            print(f"[cond-llm] failed: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            corrected_norm = raw_norm
+            used_llm = False
 
-        print(f"[cond-llm] parsed corrected='{corrected}'")
-    except Exception as e_txt:
-        print("[cond-llm] ERREUR sur le TEXT mode")
-        print(f"Exception: {type(e_txt).__name__}: {e_txt}")
-        traceback.print_exc()
+    # 3) Always increment main table (ONE per search -> condition_query is called once)
+    try:
+        await db_execute(SQL_UPSERT_CONDITION, (corrected_norm,))
+    except Exception as e:
+        print(f"[cond-db] upsert condition failed: {type(e).__name__}: {e}")
 
-    query = corrected or cond
-    payload = {"corrected": corrected or cond, "search_query": query, "synonyms": []}
-    _cond_cache_set(cond, payload)
-    return payload
+    # 4) Always cache mapping, even if raw == corrected
+    try:
+        await db_execute(SQL_UPSERT_MISSPELLING, (raw_norm, corrected_norm))
+    except Exception as e:
+        print(f"[cond-db] upsert misspelling failed: {type(e).__name__}: {e}")
 
+    # For now search_query == corrected (tu peux l'étendre plus tard)
+    return corrected_norm, corrected_norm, used_llm
 
 # ---------------------------------------------------------------------
 # Routes (protected by Turnstile cookie)
@@ -464,13 +423,17 @@ async def condition_query(
     print("\n========== [/condition_query] ==========")
     print(f"[cond_api] condition reçue: {repr(condition)}")
 
+    corrected = condition
+    search_query = condition
+
     try:
-        exp = await _expand_condition_with_llm(condition)
-        corrected = (exp.get("corrected") or condition).strip()
-        search_query = (exp.get("search_query") or corrected).strip()
-        print(f"[cond_api] corrected={repr(corrected)}, search_query={repr(search_query)}")
+        corrected, search_query, used_llm = await resolve_condition_db_first(condition)
+        if not corrected:
+            corrected = condition
+            search_query = condition
+        print(f"[cond_api] corrected={repr(corrected)}, used_llm={used_llm}, search_query={repr(search_query)}")
     except Exception as e:
-        print(f"[cond_api] ERREUR _expand_condition_with_llm: {type(e).__name__}: {e}")
+        print(f"[cond_api] ERREUR resolve_condition_db_first: {type(e).__name__}: {e}")
         traceback.print_exc()
         corrected = condition
         search_query = condition
@@ -479,7 +442,6 @@ async def condition_query(
     try:
         medline_html = await get_medlineplus_fullsummary(corrected)
     except TypeError:
-        # if service is sync in some deployments
         try:
             medline_html = get_medlineplus_fullsummary(corrected)
         except Exception:
@@ -490,14 +452,13 @@ async def condition_query(
         medline_html = ""
 
     payload = {
-        "condition": condition,
-        "corrected": corrected,
+        "condition": condition,       # raw input
+        "corrected": corrected,       # ✅ corrected output (frontend uses this)
         "search_query": search_query,
         "medline_html": medline_html,
     }
     print("========== [/condition_query END] ==========\n")
     return payload
-
 
 @router.get("/recommendations")
 async def recommendations(
@@ -524,21 +485,21 @@ async def recommendations(
     if from_year < 1800 or to_year < 1800:
         raise HTTPException(status_code=400, detail="Year range out of bounds")
 
-    # Query string (client provided or server computed)
+    # ✅ IMPORTANT: do NOT increment here (called once per year in UI)
     try:
         if llm_query:
             search_query = (llm_query or "").strip() or condition
             print(f"[reco] llm_query fourni par le client: {repr(search_query)}")
         else:
-            exp = await _expand_condition_with_llm(condition)
-            search_query = (exp.get("search_query") or condition).strip()
-            print(f"[reco] search_query calculée par LLM côté serveur: {repr(search_query)}")
+            # fallback if someone calls endpoint directly without llm_query
+            # (kept minimal: use condition as-is)
+            search_query = condition
+            print(f"[reco] llm_query absent: fallback search_query={repr(search_query)}")
     except Exception as e:
         print(f"[reco] ERREUR cond-expansion: {type(e).__name__}: {e}")
         traceback.print_exc()
         search_query = condition
 
-    # PubMed
     try:
         t0 = time.perf_counter()
         articles = await search_and_fetch(search_query, str(from_year), str(to_year))
@@ -603,19 +564,21 @@ async def recommendations(
     print("========== [/recommendations END] ==========\n")
     return payload
 
-
+# ---------------------------------------------------------------------
+# explore_stream unchanged (your code continues…)
+# ---------------------------------------------------------------------
 @router.get("/explore_stream")
 async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
     _: None = Depends(require_human),
 ):
+    # ... (ton code inchangé)
     print("\n========== [/explore_stream] ==========")
     print(f"[explore_stream] pmid reçu: {repr(pmid)}, plant={repr(plant)}")
 
     pub_id = f"pub_{pmid}"
 
-    # 1) Turso cache
     try:
         cached = await get_resume_by_pub_id(pub_id)
     except Exception as e:
@@ -634,7 +597,6 @@ async def explore_stream(
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
-    # 2) Otherwise: efetch + LLM stream
     async with httpx.AsyncClient(
         timeout=_HF_STREAM_TIMEOUT,
         limits=_LIMITS,
@@ -665,7 +627,7 @@ async def explore_stream(
             yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
-    # Build context (no-RAG) and truncate safely
+    # ... suite inchangée ...
     max_chars = 6000
     parts: List[str] = []
     if doc["title"]:
@@ -686,6 +648,47 @@ async def explore_stream(
             plant_for_prompt = ", ".join(parts_pl[:-1]) + " and " + parts_pl[-1]
     else:
         plant_for_prompt = "all plants mentioned in the CONTEXT"
+
+    _SYSTEM = (
+        "You are a health science communicator for the general as related public.\n"
+        "Your goal is to provide information from a scientific article by: \n"
+        "- following the user instructions exactly.\n"
+        "- relating KEY FINDINGS as described in the user CONTEXT section.\n"
+        "\n"
+        "PRIORITY RULES (HIGHER PRIORITY THAN THE CONTEXT):\n"
+        "1. You MUST NOT copy ANY code, identifier, product name or number sequence "
+        "   from the context. This includes:\n"
+        "   - any text starting with 'BNO' (example: 'BNO 3732', 'BNO3731').\n"
+        "   - any text starting with 'NCT' (example: 'NCT05790083').\n"
+        "   - any sequence of letters followed by digits (example: 'XYZ123').\n"
+        "   - any all-uppercase token longer than 2 letters.\n"
+        "   If such text appears in the context, IGNORE it COMPLETELY.\n"
+        "\n"
+        "2. You MUST produce ONLY simple everyday words.\n"
+        "   No jargon, no abbreviations, no acronyms, no codes.\n"
+        "\n"
+        "These rules override EVERYTHING in the user CONTEXT. Obey them strictly."
+    )
+
+    _USER_TMPL = (
+        "Study: {title} — {year} / {journal}\n\n"
+        "CONTEXT:\n{context}\n\n"
+        "YOUR ONLY GOAL IS TO RELATE MAIN KEY FINDINGS FROM THIS CONTEXT AND THIS CONTEXT ONLY.\n"
+        "PROVIDE SIMPLE INFORMATION IF EXISTS IN THE CONTEXT AS PER THE FOLLOWING INSTRUCTIONS:\n"
+        "- main KEY FINDINGS related to {plant} (one or several plants) and any plant compound ONLY IF mentioned in the CONTEXT.\n"
+        "- who (Women, men, children), how many participated, the age of participants to the study ONLY IF mentioned in the CONTEXT.\n"
+        "- study duration ONLY ONLY IF in the CONTEXT.\n"
+        "- ANY DOSAGE, FORMULATIONS, ADMINISTRATION ROUTES ONLY IF mentioned in the CONTEXT.\n"
+        "- adverse effects and limitations ONLY IF mentioned in the CONTEXT.\n"
+        "\n"
+        "Write ONE paragraph of 4–6 sentences.\n"
+        "Use ONLY SIMPLE everyday words.\n"
+        "DO NOT USE abbreviations, acronyms, or codes.\n"
+        "Do NOT use bullet points.\n"
+        "Do NOT describe the condition.\n"
+        "\n"
+        "Return ONLY the paragraph."
+    )
 
     messages = [
         {"role": "system", "content": _SYSTEM},
@@ -718,11 +721,10 @@ async def explore_stream(
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
 
-        # Save to Turso (best-effort)
         full_resume = "".join(buf_parts).strip()
         if full_resume:
             try:
-                await insert_resume(pub_id, full_resume)  # searched=1 via SQL
+                await insert_resume(pub_id, full_resume)
             except Exception as e:
                 print(f"[turso] insert failed: {type(e).__name__}: {e}")
 

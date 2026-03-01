@@ -11,14 +11,10 @@
   <link rel="icon" type="image/svg+xml"
   href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cpath%20fill='%232e7d32'%20d='M52%2012C36%2014%2022%2026%2016%2042c-2%206-2%2014%200%2018%204-2%2012-2%2018-4%2016-6%2028-20%2018-44z'/%3E%3Cpath%20fill='none'%20stroke='%231b5e20'%20stroke-width='4'%20stroke-linecap='round'%20d='M22%2042c10-10%2018-16%2030-24'/%3E%3C/svg%3E" />
 
-  <!-- NOTE: path commence par '/' pour StaticFiles -->
   <link rel="stylesheet" href="{{ url_for('static', path='/theme-green-orange.css') }}">
-
-  <!-- Cloudflare Turnstile -->
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 
   <style>
-    /* Petit style "gate" minimal si ton CSS n'a rien pour #gate */
     #gate { max-width: 520px; margin: 2rem auto; padding: 1rem; }
     #app  { max-width: 980px; margin: 0 auto; padding: 1rem; }
   </style>
@@ -44,7 +40,7 @@
   <!-- App (hidden until verified) -->
   <div id="app" style="display:none;">
 
-    <h1>Medicinal Plants in Research 
+    <h1>Medicinal Plants in Research
       <span class="subtitle">Check each abstract for clinical relevance</span>
     </h1>
     <p class="muted">
@@ -70,11 +66,6 @@
     </footer>
 
     <script>
-      /**
-       * Turnstile gate logic:
-       * - User completes captcha -> POST token to /api/verify_human
-       * - If OK: hide gate, show app
-       */
       (function () {
         const gateEl = document.getElementById("gate");
         const appEl  = document.getElementById("app");
@@ -104,13 +95,11 @@
             throw new Error(`Verification failed${details}`);
           }
 
-          // OK
           setGateMsg("");
           if (gateEl) gateEl.style.display = "none";
           if (appEl)  appEl.style.display  = "block";
         }
 
-        // callbacks used by Turnstile (must be global)
         window.onTsOk = async function (token) {
           try {
             await verifyToken(token);
@@ -118,7 +107,6 @@
             console.error(e);
             alert(e.message || "Verification failed. Please try again.");
             setGateMsg("Verification failed. Please retry.");
-            // reset widget if available
             if (window.turnstile && typeof window.turnstile.reset === "function") {
               window.turnstile.reset();
             }
@@ -134,17 +122,12 @@
         };
       })();
 
-      /**
-       * App logic (runs only after #app becomes visible, because this script is inside #app)
-       */
       const THIS_YEAR = new Date().getFullYear();
       const MIN_YEAR = 1980;
-      const CONCURRENCY = 1; // increase carefully if backend can handle it
+      const CONCURRENCY = 1;
 
-      // year actually used for queries
       let START_YEAR = THIS_YEAR;
 
-      // --- Typewriter: reveal block-by-block ---
       function showTypewriterHtmlLines(el, html, lineDelay = 1800) {
         if (!el) return;
 
@@ -181,7 +164,6 @@
         addNextLine();
       }
 
-      // --- Initialisation dropdown année ---
       function initYearSelect() {
         const sel = document.getElementById("fromYear");
         if (!sel) return;
@@ -197,25 +179,10 @@
         if (!sel.value) sel.value = String(THIS_YEAR);
       }
 
-      // --- Escape helpers ---
       const esc = (s = "") => String(s).replace(/[&<>"']/g, m => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
       }[m]));
 
-      // kept if needed later
-      const unesc = (s = "") =>
-        String(s)
-          .replace(/&lt;/g, "<")
-          .replace(/&gt;/g, ">")
-          .replace(/&quot;/g, "\"")
-          .replace(/&#39;/g, "'")
-          .replace(/&amp;/g, "&");
-
-      /**
-       * Render "About this condition" without blocking PubMed.
-       * - collapsed: plain text
-       * - expandable: rich HTML with typewriter on first expand
-       */
       function renderDiseaseSummaryAsync(summaryBoxEl, summaryPlainEl, summaryRichEl, summaryToggleEl, medlineHtml) {
         (async () => {
           let richRendered = false;
@@ -269,7 +236,6 @@
         })();
       }
 
-      // --- ExploreAI streaming ---
       async function exploreArticle(btnEl){
         const pmid  = btnEl.dataset.pmid;
         const plant = (btnEl.dataset.plant || "").trim();
@@ -330,11 +296,8 @@
         }
       }
 
-
-      // make callable from onclick attribute
       window.exploreArticle = exploreArticle;
 
-      // --- Plant card ---
       function renderPlantCard(x) {
         const list = (x.top_studies || []).map(s => `
           <div class="pmids">
@@ -365,7 +328,6 @@
         `;
       }
 
-      // --- Fetch year-by-year ---
       async function runApiByYear(condition, llmQuery) {
         const yearsEl = document.getElementById("years");
         const progressEl = document.getElementById("progress");
@@ -416,7 +378,6 @@
             `;
 
             if (progressEl) progressEl.textContent = `Rendered year: ${year}`;
-            console.log("Rendered year", year, "count=", results.length);
           } catch (e) {
             console.error("Year", year, e);
             sec.innerHTML = `<h2>${year}</h2><p class="muted">Error while loading.</p>`;
@@ -437,7 +398,6 @@
         if (progressEl) progressEl.textContent = "";
       }
 
-      // --- Main run ---
       async function run() {
         const condEl = document.getElementById("cond");
         const rawCond = (condEl ? condEl.value : "").trim();
@@ -482,25 +442,28 @@
         const summaryRichEl = document.getElementById("diseaseSummaryRich");
         const summaryToggleEl = document.getElementById("diseaseSummaryToggle");
 
-        // 1) Wait LLM normalization, THEN launch PubMed
-        let condition = rawCond;
+        // 1) Wait condition normalization (cache DB first on backend), THEN launch PubMed
+        let correctedCondition = rawCond;
         let llmQuery = rawCond;
         let medlineHtml = "";
 
         try {
           const v = Date.now();
           const url = `/api/condition_query?condition=${encodeURIComponent(rawCond)}&_v=${v}`;
-          const r = await fetch(url, { cache: "no-store" });
+          const r = await fetch(url, { cache: "no-store", credentials: "include" });
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
           const js = await r.json();
-          condition = (js.condition || rawCond).trim();
-          llmQuery = (js.search_query || rawCond).trim();
+
+          // ✅ IMPORTANT: backend returns corrected in js.corrected
+          correctedCondition = (js.corrected || rawCond).trim();
+          llmQuery = (js.search_query || correctedCondition || rawCond).trim();
           medlineHtml = (js.medline_html || "").trim();
+
           console.log("[UI] condition_query retour:", js);
         } catch (e) {
           console.error("[UI] Erreur condition_query:", e);
-          condition = rawCond;
+          correctedCondition = rawCond;
           llmQuery = rawCond;
           medlineHtml = "";
         }
@@ -519,19 +482,16 @@
         }
 
         let msg = "";
-        if (terms.length === 0) msg = `Searching for: ${llmQuery || condition}`;
+        if (terms.length === 0) msg = `Searching for: ${llmQuery || correctedCondition}`;
         else if (terms.length === 1) msg = `Searching for: ${terms[0]}`;
         else msg = `Searching for: ${terms.join(", ")}`;
 
-        if (condition && terms[0] && condition.toLowerCase() !== terms[0].toLowerCase()) {
-          msg += ` (expanded from “${condition}”)`;
-        }
         if (searchInfoEl) searchInfoEl.textContent = msg;
 
-        // Start PubMed ASAP after llmQuery ready
-        const pubmedPromise = runApiByYear(condition, llmQuery);
+        // PubMed after query ready
+        const pubmedPromise = runApiByYear(correctedCondition, llmQuery);
 
-        // Render summary in parallel (non blocking)
+        // Summary in parallel (non blocking)
         renderDiseaseSummaryAsync(summaryBoxEl, summaryPlainEl, summaryRichEl, summaryToggleEl, medlineHtml);
 
         // Wait only PubMed
@@ -544,7 +504,6 @@
         }
       }
 
-      // Events
       document.getElementById("btn")?.addEventListener("click", run);
       document.getElementById("cond")?.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter") run();
