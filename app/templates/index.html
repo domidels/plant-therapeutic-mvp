@@ -7,16 +7,60 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Natural Therapeutics (MVP)</title>
 
-  <!-- Favicon inline pour éviter une requête /favicon.ico pendante -->
   <link rel="icon" type="image/svg+xml"
-  href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cpath%20fill='%232e7d32'%20d='M52%2012C36%2014%2022%2026%2016%2042c-2%206-2%2014%200%2018%204-2%2012-2%2018-4%2016-6%2028-20%2018-44z'/%3E%3Cpath%20fill='none'%20stroke='%231b5e20'%20stroke-width='4'%20stroke-linecap='round'%20d='M22%2042c10-10%2018-16%2030-24'/%3E%3C/svg%3E" />
+    href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cpath%20fill='%232e7d32'%20d='M52%2012C36%2014%2022%2026%2016%2042c-2%206-2%2014%200%2018%204-2%2012-2%2018-4%2016-6%2028-20%2018-44z'/%3E%3Cpath%20fill='none'%20stroke='%231b5e20'%20stroke-width='4'%20stroke-linecap='round'%20d='M22%2042c10-10%2018-16%2030-24'/%3E%3C/svg%3E" />
 
   <link rel="stylesheet" href="{{ url_for('static', path='/theme-green-orange.css') }}">
   <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 
   <style>
     #gate { max-width: 520px; margin: 2rem auto; padding: 1rem; }
-    #app  { max-width: 980px; margin: 0 auto; padding: 1rem; }
+    #app  { max-width: 980px; margin: 0 auto; padding: 1rem; position: relative; }
+
+    .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    .auth-grid { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.5rem; align-items:center; }
+    .auth-grid input { flex: 1; min-width: 220px; }
+    .auth-grid .code { max-width: 160px; }
+
+    /* --- NEW: blur + lock underlying page --- */
+    #app.locked #appContent {
+      filter: blur(6px);
+      opacity: 0.65;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    /* --- NEW: top-right disconnect button --- */
+    #topBar {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: flex;
+      justify-content: flex-end;
+      padding: .5rem 0;
+      background: transparent;
+    }
+    #btnLogoutTop {
+      display: none;
+    }
+
+    /* --- NEW: auth overlay layer --- */
+    #authOverlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      background: rgba(0,0,0,0.45);
+      backdrop-filter: blur(2px);
+    }
+    #authOverlay .auth-modal {
+      width: min(560px, 100%);
+      max-width: 560px;
+      margin: 0;
+    }
   </style>
 </head>
 
@@ -40,32 +84,72 @@
   <!-- App (hidden until verified) -->
   <div id="app" style="display:none;">
 
-    <h1>Medicinal Plants in Research
-      <span class="subtitle">Check each abstract for clinical relevance</span>
-    </h1>
-    <p class="muted">
-      This tool summarizes <em>peer-reviewed</em> research from PubMed.
-      It is <strong>information only</strong> and not medical advice.
-    </p>
+    <!-- NEW: top bar with Disconnect -->
+    <div id="topBar">
+      <button id="btnLogoutTop" type="button">Disconnect</button>
+    </div>
 
-    <div class="row">
-      <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, eczema (enter one disease or symptom at a time)" />
+    <!-- NEW: Auth overlay (covers the page) -->
+    <div id="authOverlay" aria-hidden="true">
+      <div class="card auth-modal">
+        <div class="muted"><strong>Sign in</strong> — helps prevent abuse and keep this free.</div>
 
-      <div class="row-actions">
-        <span class="start-label">Start searching from</span>
-        <select id="fromYear"></select>
-        <button id="btn">Search</button>
+        <div class="auth-grid" id="authRowEmail">
+          <input id="authEmail" placeholder="Email address" autocomplete="email" />
+          <button id="btnSendCode" type="button">Send code</button>
+        </div>
+
+        <div class="auth-grid" id="authRowCode">
+          <input id="authCode" class="code" placeholder="6-digit code" inputmode="numeric" />
+          <button id="btnVerifyCode" type="button">Verify</button>
+        </div>
+
+        <div id="authMsg" class="muted" style="margin-top:.5rem;"></div>
+        <div id="quotaMsg" class="muted" style="margin-top:.25rem; display:none;"></div>
+
+        <div class="muted" style="margin-top:.75rem; font-size:.95em;">
+          By continuing, you agree this is <strong>information only</strong> (not medical advice).
+        </div>
       </div>
     </div>
 
-    <div id="out"></div>
+    <!-- Everything below gets blurred/locked while signed out -->
+    <div id="appContent">
 
-    <footer>
-      Sources: PubMed E-utilities. This MVP highlights plants/supplements mentioned in study titles/abstracts
-      and ranks simple evidence signals (meta-analyses, Randomized Control Trials, recency).
-    </footer>
+      <h1>Medicinal Plants in Research
+        <span class="subtitle">Check each abstract for clinical relevance</span>
+      </h1>
+
+      <p class="muted">
+        This tool summarizes <em>peer-reviewed</em> research from PubMed.
+        It is <strong>information only</strong> and not medical advice.
+      </p>
+
+      <div class="row">
+        <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, eczema (enter one disease or symptom at a time)" />
+
+        <div class="row-actions">
+          <span class="start-label">Start searching from</span>
+          <select id="fromYear"></select>
+          <button id="btn">Search</button>
+        </div>
+      </div>
+
+      <div id="out"></div>
+
+      <footer>
+        Sources: PubMed E-utilities. This MVP highlights plants/supplements mentioned in study titles/abstracts
+        and ranks simple evidence signals (meta-analyses, Randomized Control Trials, recency).
+      </footer>
+
+    </div>
 
     <script>
+      /**
+       * Turnstile gate logic:
+       * - User completes captcha -> POST token to /api/verify_human
+       * - If OK: hide gate, show app
+       */
       (function () {
         const gateEl = document.getElementById("gate");
         const appEl  = document.getElementById("app");
@@ -98,6 +182,8 @@
           setGateMsg("");
           if (gateEl) gateEl.style.display = "none";
           if (appEl)  appEl.style.display  = "block";
+
+          await refreshAuthState(); // will lock/unlock app + show overlay
         }
 
         window.onTsOk = async function (token) {
@@ -113,24 +199,184 @@
           }
         };
 
-        window.onTsError = function () {
-          setGateMsg("Captcha error. Please retry.");
-        };
-
-        window.onTsExpired = function () {
-          setGateMsg("Captcha expired. Please retry.");
-        };
+        window.onTsError = function () { setGateMsg("Captcha error. Please retry."); };
+        window.onTsExpired = function () { setGateMsg("Captcha expired. Please retry."); };
       })();
 
+
+      // ---------------------------
+      // Auth helpers (overlay + blur-lock page)
+      // ---------------------------
+      const appEl = document.getElementById("app");
+
+      const authOverlayEl = document.getElementById("authOverlay");
+      const authMsgEl = document.getElementById("authMsg");
+      const quotaMsgEl = document.getElementById("quotaMsg");
+
+      const emailRow = document.getElementById("authRowEmail");
+      const codeRow  = document.getElementById("authRowCode");
+
+      const emailInput = document.getElementById("authEmail");
+      const codeInput  = document.getElementById("authCode");
+
+      const btnSend   = document.getElementById("btnSendCode");
+      const btnVerify = document.getElementById("btnVerifyCode");
+
+      const btnLogoutTop = document.getElementById("btnLogoutTop");
+
+      function setAuthMsg(s){ if(authMsgEl) authMsgEl.textContent = s || ""; }
+      function hideQuotaLine(){ if(quotaMsgEl) quotaMsgEl.style.display = "none"; }
+
+      function showAuthOverlay(){
+        if(authOverlayEl){
+          authOverlayEl.style.display = "flex";
+          authOverlayEl.setAttribute("aria-hidden", "false");
+        }
+      }
+      function hideAuthOverlay(){
+        if(authOverlayEl){
+          authOverlayEl.style.display = "none";
+          authOverlayEl.setAttribute("aria-hidden", "true");
+        }
+      }
+
+      function lockApp(){
+        if(appEl) appEl.classList.add("locked");
+      }
+      function unlockApp(){
+        if(appEl) appEl.classList.remove("locked");
+      }
+
+      function setSignedInUI(){
+        hideAuthOverlay();
+        unlockApp();
+
+        if(btnLogoutTop){
+          btnLogoutTop.style.display = "inline-block";
+          btnLogoutTop.textContent = "Disconnect";
+        }
+
+        // Reset overlay message
+        hideQuotaLine();
+        setAuthMsg("");
+      }
+
+      function setSignedOutUI(){
+        // Only show overlay if app is visible (i.e. after Turnstile)
+        if(appEl && appEl.style.display !== "none"){
+          showAuthOverlay();
+          lockApp();
+        }
+
+        if(btnLogoutTop) btnLogoutTop.style.display = "none";
+
+        // Make sure inputs are visible in overlay
+        if(emailRow) emailRow.style.display = "flex";
+        if(codeRow)  codeRow.style.display  = "flex";
+
+        if(emailInput) emailInput.style.display = "inline-block";
+        if(codeInput)  codeInput.style.display  = "inline-block";
+        if(btnSend)    btnSend.style.display    = "inline-block";
+        if(btnVerify)  btnVerify.style.display  = "inline-block";
+
+        hideQuotaLine();
+        setAuthMsg("");
+
+        // focus email for faster UX
+        setTimeout(() => { try { emailInput?.focus(); } catch(_){} }, 50);
+      }
+
+      async function authMe(){
+        const r = await fetch("/api/auth/me", { cache:"no-store", credentials:"include" });
+        if(!r.ok) return null;
+        return await r.json();
+      }
+
+      async function refreshAuthState(){
+        const me = await authMe();
+        if(me && me.ok){
+          setSignedInUI();
+          return true;
+        } else {
+          setSignedOutUI();
+          return false;
+        }
+      }
+
+      document.getElementById("btnSendCode")?.addEventListener("click", async () => {
+        const email = (emailInput?.value || "").trim();
+        if(!email) return;
+
+        setAuthMsg("Sending code…");
+
+        const r = await fetch("/api/auth/request_code", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ email }),
+          credentials:"include",
+          cache:"no-store"
+        });
+
+        if(!r.ok){
+          const t = await r.text().catch(()=> "");
+          setAuthMsg(`Error: ${t || r.status}`);
+          return;
+        }
+
+        setAuthMsg("Code sent. Check your email.");
+        setTimeout(() => { try { codeInput?.focus(); } catch(_){} }, 50);
+      });
+
+      document.getElementById("btnVerifyCode")?.addEventListener("click", async () => {
+        const email = (emailInput?.value || "").trim();
+        const code  = (codeInput?.value || "").trim();
+        if(!email || !code) return;
+
+        setAuthMsg("Verifying…");
+
+        const r = await fetch("/api/auth/verify_code", {
+          method:"POST",
+          headers:{ "Content-Type":"application/json" },
+          body: JSON.stringify({ email, code }),
+          credentials:"include",
+          cache:"no-store"
+        });
+
+        if(!r.ok){
+          const t = await r.text().catch(()=> "");
+          setAuthMsg(`Error: ${t || r.status}`);
+          return;
+        }
+
+        await refreshAuthState();
+      });
+
+      // NEW: logout top-right
+      btnLogoutTop?.addEventListener("click", async () => {
+        await fetch("/api/auth/logout", { method:"POST", credentials:"include", cache:"no-store" }).catch(()=>{});
+        setSignedOutUI();
+      });
+
+      async function ensureSignedIn(){
+        const ok = await refreshAuthState();
+        if(!ok){
+          // No alert; overlay is the UX
+          return false;
+        }
+        return true;
+      }
+
+
+      // ---------------------------
+      // App logic
+      // ---------------------------
       const THIS_YEAR = new Date().getFullYear();
       const MIN_YEAR = 1980;
       const CONCURRENCY = 1;
-
       let START_YEAR = THIS_YEAR;
 
       function showTypewriterHtmlLines(el, html, lineDelay = 1800) {
         if (!el) return;
-
         el.innerHTML = "";
 
         const tmp = document.createElement("div");
@@ -220,7 +466,6 @@
             richRendered = false;
 
             summaryToggleEl.style.display = plain.length > 140 ? "inline-flex" : "none";
-
             setExpanded(false);
 
             summaryToggleEl.onclick = () => {
@@ -237,6 +482,8 @@
       }
 
       async function exploreArticle(btnEl){
+        if(!(await ensureSignedIn())) return;
+
         const pmid  = btnEl.dataset.pmid;
         const plant = (btnEl.dataset.plant || "").trim();
 
@@ -256,7 +503,7 @@
         }
 
         box.innerHTML = `
-          <div class="muted"><strong>AI exploration</strong> — info only.</div>
+          <div class="muted"><strong>Plant-focused summary</strong> — info only.</div>
           <pre id="ai-${esc(pmid)}" style="white-space:pre-wrap;margin:0;">Loading…</pre>
         `;
 
@@ -271,6 +518,7 @@
             cache: 'no-store',
             credentials: 'include'
           });
+
           if (!r.ok) {
             const t = await r.text().catch(()=> "");
             throw new Error(`HTTP ${r.status} ${t ? "- " + t.slice(0,200) : ""}`);
@@ -288,6 +536,7 @@
             if (pre) pre.textContent += chunk;
           }
 
+          await refreshAuthState();
         }catch(e){
           console.error(e);
           if (pre) pre.textContent = `Error: ${e.message || e}`;
@@ -331,7 +580,6 @@
       async function runApiByYear(condition, llmQuery) {
         const yearsEl = document.getElementById("years");
         const progressEl = document.getElementById("progress");
-
         if (!yearsEl) return;
 
         const startY = Math.max(MIN_YEAR, Math.min(START_YEAR, THIS_YEAR));
@@ -365,7 +613,7 @@
             if (llmQuery) params.set("llm_query", llmQuery);
 
             const url = `/api/recommendations?${params.toString()}`;
-            const r = await fetch(url, { cache: "no-store" });
+            const r = await fetch(url, { cache: "no-store", credentials:"include" });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
             const js = await r.json();
@@ -399,6 +647,8 @@
       }
 
       async function run() {
+        if(!(await ensureSignedIn())) return;
+
         const condEl = document.getElementById("cond");
         const rawCond = (condEl ? condEl.value : "").trim();
         if (!rawCond) return;
@@ -442,7 +692,6 @@
         const summaryRichEl = document.getElementById("diseaseSummaryRich");
         const summaryToggleEl = document.getElementById("diseaseSummaryToggle");
 
-        // 1) Wait condition normalization (cache DB first on backend), THEN launch PubMed
         let correctedCondition = rawCond;
         let llmQuery = rawCond;
         let medlineHtml = "";
@@ -454,47 +703,22 @@
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
           const js = await r.json();
-
-          // ✅ IMPORTANT: backend returns corrected in js.corrected
           correctedCondition = (js.corrected || rawCond).trim();
           llmQuery = (js.search_query || correctedCondition || rawCond).trim();
           medlineHtml = (js.medline_html || "").trim();
-
-          console.log("[UI] condition_query retour:", js);
         } catch (e) {
-          console.error("[UI] Erreur condition_query:", e);
+          console.error("[UI] condition_query error:", e);
           correctedCondition = rawCond;
           llmQuery = rawCond;
           medlineHtml = "";
         }
 
-        // 2) Update banner
-        let terms = [];
-        if (llmQuery) {
-          const parts = llmQuery.split(/\s+OR\s+/i);
-          terms = parts
-            .map(s => {
-              const m = s.match(/^"(.*)"$/);
-              const t = m ? m[1] : s;
-              return t.trim();
-            })
-            .filter(Boolean);
-        }
+        if (searchInfoEl) searchInfoEl.textContent = `Searching for: ${llmQuery || correctedCondition}`;
 
-        let msg = "";
-        if (terms.length === 0) msg = `Searching for: ${llmQuery || correctedCondition}`;
-        else if (terms.length === 1) msg = `Searching for: ${terms[0]}`;
-        else msg = `Searching for: ${terms.join(", ")}`;
-
-        if (searchInfoEl) searchInfoEl.textContent = msg;
-
-        // PubMed after query ready
         const pubmedPromise = runApiByYear(correctedCondition, llmQuery);
 
-        // Summary in parallel (non blocking)
         renderDiseaseSummaryAsync(summaryBoxEl, summaryPlainEl, summaryRichEl, summaryToggleEl, medlineHtml);
 
-        // Wait only PubMed
         try {
           await pubmedPromise;
         } catch (e) {
@@ -502,6 +726,8 @@
           const progressEl = document.getElementById("progress");
           if (progressEl) progressEl.textContent = "Error fetching results.";
         }
+
+        await refreshAuthState();
       }
 
       document.getElementById("btn")?.addEventListener("click", run);

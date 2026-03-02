@@ -7,8 +7,10 @@ import os, pathlib
 from pathlib import Path
 from fastapi.templating import Jinja2Templates
 BASE_DIR = Path(__file__).resolve().parent
+from app.services.turso_db import init_db
 
 app = FastAPI(title="Natural Therapeutics MVP", version="0.1")
+
 
 # Static
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -26,3 +28,8 @@ def index(request: Request):
 
 
 app.include_router(router, prefix="/api", tags=["recommendations"])
+
+
+@app.on_event("startup")
+async def _startup():
+    await init_db()

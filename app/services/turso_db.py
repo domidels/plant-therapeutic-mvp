@@ -1,6 +1,7 @@
 # app/services/turso_db.py
 from __future__ import annotations
-
+import uuid
+import datetime
 import os
 from typing import Optional, Sequence, Any
 from libsql_client import create_client
@@ -95,6 +96,51 @@ async def init_db() -> None:
         """
     )
 
+    # --- auth_users ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS auth_users (
+            user_id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            last_login TEXT
+        );
+    """)
+
+    # --- auth_otp (stocke hash du code) ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS auth_otp (
+            email TEXT PRIMARY KEY,
+            code_hash TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
+    """)
+
+    # --- auth_sessions ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS auth_sessions (
+            session_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    );
+    """)
+    await db_execute("""CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);""")
+
+    # --- usage_daily ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS usage_daily (
+            user_id TEXT NOT NULL,
+            day TEXT NOT NULL, -- 'YYYY-MM-DD' UTC
+            hf_tokens INTEGER NOT NULL DEFAULT 0,
+            turso_ops INTEGER NOT NULL DEFAULT 0,
+            explore_calls INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, day)
+        );
+    """)
+    await db_execute("""CREATE INDEX IF NOT EXISTS idx_usage_daily_user ON usage_daily(user_id);""")
+
 
 # ---------------------------------------------------------------------
 # pub_resume functions
@@ -139,4 +185,113 @@ async def upsert_increment_or_insert(pub_id: str, resume_if_insert: str) -> None
           searched = COALESCE(pub_resume.searched, 0) + 1;
         """,
         (pub_id, resume_if_insert),
+    )
+    
+def _utc_day_str() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+
+# ---------------------------
+# Auth helpers
+# ---------------------------
+async def auth_get_user_by_email(email: str) -> Optional[tuple]:
+    return await db_fetchone(
+        "SELECT user_id, email FROM auth_users WHERE email=? LIMIT 1;",
+        (email,),
+    )
+
+
+async def auth_create_user(email: str) -> str:
+    user_id = str(uuid.uuid4())
+    await db_execute("INSERT INTO auth_users(user_id, email) VALUES(?, ?);", (user_id, email))
+    return user_id
+
+
+async def auth_touch_last_login(user_id: str) -> None:
+    await db_execute(
+        "UPDATE auth_users SET last_login=CURRENT_TIMESTAMP WHERE user_id=?;",
+        (user_id,),
+    )
+
+
+async def auth_upsert_otp(email: str, code_hash: str, expires_at: int) -> None:
+    await db_execute(
+        """
+        INSERT INTO auth_otp(email, code_hash, expires_at, attempts)
+        VALUES(?, ?, ?, 0)
+        ON CONFLICT(email) DO UPDATE SET
+          code_hash=excluded.code_hash,
+          expires_at=excluded.expires_at,
+          attempts=0;
+        """,
+        (email, code_hash, expires_at),
+    )
+
+
+async def auth_get_otp(email: str) -> Optional[tuple]:
+    return await db_fetchone(
+        "SELECT code_hash, expires_at, attempts FROM auth_otp WHERE email=? LIMIT 1;",
+        (email,),
+    )
+
+
+async def auth_inc_otp_attempts(email: str) -> None:
+    await db_execute(
+        "UPDATE auth_otp SET attempts=attempts+1 WHERE email=?;",
+        (email,),
+    )
+
+
+async def auth_delete_otp(email: str) -> None:
+    await db_execute("DELETE FROM auth_otp WHERE email=?;", (email,))
+
+
+async def auth_create_session(session_id: str, user_id: str, expires_at: int) -> None:
+    await db_execute(
+        "INSERT INTO auth_sessions(session_id, user_id, expires_at) VALUES(?, ?, ?);",
+        (session_id, user_id, expires_at),
+    )
+
+
+async def auth_get_session(session_id: str) -> Optional[tuple]:
+    return await db_fetchone(
+        "SELECT user_id, expires_at FROM auth_sessions WHERE session_id=? LIMIT 1;",
+        (session_id,),
+    )
+
+
+async def auth_delete_session(session_id: str) -> None:
+    await db_execute("DELETE FROM auth_sessions WHERE session_id=?;", (session_id,))
+
+
+# ---------------------------
+# Usage / quota helpers
+# ---------------------------
+async def usage_get(user_id: str) -> tuple[int, int, int]:
+    day = _utc_day_str()
+    row = await db_fetchone(
+        "SELECT hf_tokens, turso_ops, explore_calls FROM usage_daily WHERE user_id=? AND day=? LIMIT 1;",
+        (user_id, day),
+    )
+    if not row:
+        await db_execute(
+            "INSERT INTO usage_daily(user_id, day, hf_tokens, turso_ops, explore_calls) VALUES(?, ?, 0, 0, 0);",
+            (user_id, day),
+        )
+        return (0, 0, 0)
+    return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+
+
+async def usage_add(user_id: str, add_hf_tokens: int = 0, add_turso_ops: int = 0, add_explore: int = 0) -> None:
+    day = _utc_day_str()
+    await db_execute(
+        """
+        INSERT INTO usage_daily(user_id, day, hf_tokens, turso_ops, explore_calls)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, day) DO UPDATE SET
+          hf_tokens = hf_tokens + excluded.hf_tokens,
+          turso_ops = turso_ops + excluded.turso_ops,
+          explore_calls = explore_calls + excluded.explore_calls;
+        """,
+        (user_id, day, add_hf_tokens, add_turso_ops, add_explore),
     )
