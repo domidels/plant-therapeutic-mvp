@@ -9,7 +9,7 @@ from app.core.config import settings
 
 BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-# Optionnel : clé API NCBI pour de meilleurs quotas
+# Optional: NCBI API key for higher rate limits
 API_KEY = getattr(settings, "ncbi_api_key", None) or os.getenv("NCBI_API_KEY", None)
 
 
@@ -29,7 +29,7 @@ def _headers():
 
 
 def _client() -> httpx.AsyncClient:
-    # http2=False : NCBI coupe parfois les connexions HTTP/2
+    # http2=False: NCBI sometimes drops HTTP/2 connections
     return httpx.AsyncClient(http2=False, timeout=httpx.Timeout(35.0))
 
 
@@ -45,7 +45,7 @@ def build_query(condition: str, from_year: str, to_year: str) -> str:
 
 
 async def _sleep_backoff(attempt: int):
-    # Backoff exponentiel borné + jitter
+    # Bounded exponential backoff with jitter
     base = min(1.7**attempt, 12.0)
     await asyncio.sleep(base + random.random() * 0.4)
 
@@ -109,7 +109,7 @@ async def esearch_all(
     client: httpx.AsyncClient, query: str, page_size: int = 60, cap: int = 120
 ) -> List[str]:
     """
-    cap faible (= affichage rapide). On veut un échantillon suffisant pour scorer/rendre.
+    Low cap for fast display — we want a sufficient sample to score and render.
     """
     pmids: List[str] = []
     retstart = 0
@@ -118,7 +118,7 @@ async def esearch_all(
     retstart += len(ids)
 
     while retstart < count and len(pmids) < cap:
-        await asyncio.sleep(0.35)  # politesse
+        await asyncio.sleep(0.35)  # be polite to NCBI
         _count, ids = await esearch_page(client, query, retmax=page_size, retstart=retstart)
         if not ids:
             break
@@ -156,7 +156,7 @@ async def efetch(client: httpx.AsyncClient, pmids: List[str]) -> List[Dict]:
         journal = txt(".//Journal/Title")
         pmid = txt(".//PMID")
 
-        # Année (robuste)
+        # Robust year extraction — try multiple fields
         year = txt(".//Journal/JournalIssue/PubDate/Year") or txt(".//Article/ArticleDate/Year")
         if not year:
             for st in ("entrez", "pubmed", "medline"):
@@ -191,9 +191,9 @@ async def efetch(client: httpx.AsyncClient, pmids: List[str]) -> List[Dict]:
 async def search_and_fetch(condition: str, from_year: str, to_year: str) -> List[Dict]:
     query = build_query(condition, from_year, to_year)
     async with _client() as client:
-        ids = await esearch_all(client, query, page_size=60, cap = 120)  # cap léger
+        ids = await esearch_all(client, query, page_size=60, cap=120)
         out_efetch: List[Dict] = []
-        # petits paquets pour réduire les erreurs réseau
+        # Small batches to reduce network errors
         for i in range(0, len(ids), 20):
             subids = ids[i : i + 20]
             out_efetch.extend(await efetch(client, subids))

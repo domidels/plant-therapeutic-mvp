@@ -11,28 +11,28 @@ def get_medlineplus_fullsummary(
     timeout: int = 10
 ) -> Optional[str]:
     """
-    Interroge l'API MedlinePlus (healthTopics) et renvoie le FullSummary
-    de la première maladie trouvée, ou None si absent.
+    Query the MedlinePlus API (healthTopics) and return the FullSummary
+    of the first matching topic, or None if not found.
 
     Parameters
     ----------
     disease_name : str
-        Nom de la maladie (ex: "asthma", "type 2 diabetes", "migraine").
+        Name of the condition (e.g. "asthma", "type 2 diabetes", "migraine").
     retmax : int
-        Nombre max de documents renvoyés par l'API (on prend le premier).
+        Maximum number of documents returned by the API (only the first is used).
     timeout : int
-        Timeout HTTP en secondes.
+        HTTP timeout in seconds.
 
     Returns
     -------
     Optional[str]
-        Le contenu de FullSummary (HTML) ou None si non trouvé.
+        The FullSummary content (HTML) or None if not found.
     """
     params = {
         "db": "healthTopics",
         "term": disease_name,
         "retmax": retmax,
-        # "rettype": "full",  # optionnel, par défaut l’API renvoie déjà FullSummary
+        # "rettype": "full",  # optional — the API already returns FullSummary by default
     }
 
     resp = requests.get(MEDLINEPLUS_SEARCH_URL, params=params, timeout=timeout)
@@ -41,23 +41,22 @@ def get_medlineplus_fullsummary(
     # Parse XML
     root = ET.fromstring(resp.content)
 
-    # Parcourt les documents dans l’ordre (rank)
+    # Iterate documents in rank order
     for doc in root.findall(".//document"):
-        # Cherche un <content name="FullSummary"> ou "fullSummary"
+        # Look for <content name="FullSummary"> (case-insensitive)
         for content in doc.findall("content"):
             name = content.get("name", "")
             if name and name.lower() == "fullsummary":
-                # Le contenu est du HTML sous forme de texte (déjà échappé)
-                # On renvoie tel quel ; tu pourras ensuite le nettoyer ou l'afficher.
+                # Content is HTML as plain text (already escaped) — return as-is
                 return "".join(content.itertext()).strip()
 
-    # Si aucun FullSummary trouvé
+    # No FullSummary found
     return None
 
 
 if __name__ == "__main__":
     summary = get_medlineplus_fullsummary("Irritable bowel syndrome")
     if summary:
-        print(summary[:1000])  # on tronque juste pour l'affichage
+        print(summary[:1000])  # truncated for display
     else:
-        print("Aucun FullSummary trouvé pour cette maladie.")
+        print("No FullSummary found for this condition.")
