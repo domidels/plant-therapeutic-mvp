@@ -1,4 +1,18 @@
-# app/api/routes.py
+"""
+app/api/routes.py
+-----------------
+All HTTP endpoints for the Plant Therapeutic MVP.
+
+Rate limiting strategy
+~~~~~~~~~~~~~~~~~~~~~~
+- Cloudflare Turnstile verifies each visitor is human (cookie valid 6 h).
+- Requests are then rate-limited by hashed client IP — no account required.
+- Two quota levels are enforced per UTC day:
+    * Per-IP   : limits individual abuse.
+    * Global   : hard ceiling on total LLM cost regardless of IP count.
+- Quotas are stored in the ``usage_daily`` Turso table keyed by ``user_id``
+  (either a hashed IP or the reserved key ``_global``).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,8 +22,6 @@ import os
 import re
 import time
 import traceback
-import uuid
-import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -32,19 +44,12 @@ from app.services.turso_db import (
     # generic db helpers
     db_fetchone,
     db_execute,
-    # auth + usage
-    auth_get_user_by_email,
-    auth_create_user,
-    auth_touch_last_login,
-    auth_upsert_otp,
-    auth_get_otp,
-    auth_inc_otp_attempts,
-    auth_delete_otp,
-    auth_create_session,
-    auth_get_session,
-    auth_delete_session,
+    # usage
     usage_get,
     usage_add,
+    # tracking
+    upsert_user_session,
+    insert_user_search,
 )
 
 router = APIRouter()
@@ -69,11 +74,13 @@ class VerifyReq(BaseModel):
 
 
 def _sign_payload(payload: str) -> str:
+    """Return ``payload.HMAC`` so the cookie value cannot be forged."""
     sig = hmac.new(SESSION_SECRET, payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
 def _verify_signed(value: str) -> Optional[str]:
+    """Verify a signed cookie value and return the payload, or None if invalid."""
     try:
         payload, sig = value.rsplit(".", 1)
         expected = hmac.new(SESSION_SECRET, payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -85,6 +92,7 @@ def _verify_signed(value: str) -> Optional[str]:
 
 
 def _is_human_cookie_valid(cookie_val: str) -> bool:
+    """Return True when the Turnstile cookie is present, correctly signed, and not expired."""
     payload = _verify_signed(cookie_val)
     if not payload:
         return False
@@ -96,6 +104,7 @@ def _is_human_cookie_valid(cookie_val: str) -> bool:
 
 
 async def require_human(request: Request) -> None:
+    """FastAPI dependency — reject the request with 401 if the Turnstile cookie is missing or expired."""
     cookie_val = request.cookies.get(HUMAN_COOKIE_NAME)
     if not cookie_val or not _is_human_cookie_valid(cookie_val):
         raise HTTPException(status_code=401, detail="Human verification required")
@@ -130,6 +139,13 @@ async def verify_human(req: VerifyReq, request: Request):
     if not js.get("success"):
         raise HTTPException(status_code=403, detail="Turnstile failed")
 
+    # Track the visit (fire-and-forget — never block the response on failure)
+    try:
+        user_id = _ip_to_id(_get_client_ip(request))
+        await upsert_user_session(user_id)
+    except Exception:
+        pass
+
     exp = int(time.time()) + HUMAN_COOKIE_TTL_SECONDS
     cookie_val = _sign_payload(str(exp))
 
@@ -151,69 +167,54 @@ async def verify_human(req: VerifyReq, request: Request):
 
 
 # ---------------------------------------------------------------------
-# Auth (email OTP + session cookie)
+# IP-based rate limiting (replaces email OTP auth)
 # ---------------------------------------------------------------------
-AUTH_SESSION_COOKIE = "pm_sess"
-AUTH_SESSION_TTL_SECONDS = int(os.getenv("AUTH_SESSION_TTL_SECONDS", "1209600"))  # 14d
-AUTH_OTP_TTL_SECONDS = int(os.getenv("AUTH_OTP_TTL_SECONDS", "600"))  # 10 min
 
-RESEND_API_KEY = (os.getenv("RESEND_API_KEY", "")).strip()
-EMAIL_FROM = (os.getenv("EMAIL_FROM", "Plant-Med <no-reply@plant-med.org>")).strip()
-
-# Quotas per user per UTC day
+# Quotas per IP per UTC day
 DAILY_HF_TOKEN_LIMIT = int(os.getenv("DAILY_HF_TOKEN_LIMIT", "4000"))
 DAILY_TURSO_OP_LIMIT = int(os.getenv("DAILY_TURSO_OP_LIMIT", "5000"))
 DAILY_EXPLORE_LIMIT = int(os.getenv("DAILY_EXPLORE_LIMIT", "25"))
 
-
-def _valid_email(email: str) -> bool:
-    email = (email or "").strip()
-    if len(email) < 5 or len(email) > 200:
-        return False
-    # very simple check
-    return ("@" in email) and ("." in email.split("@")[-1])
+# Global quotas (all IPs combined) — hard ceiling to cap total daily cost
+DAILY_GLOBAL_HF_TOKEN_LIMIT = int(os.getenv("DAILY_GLOBAL_HF_TOKEN_LIMIT", "50000"))
+DAILY_GLOBAL_EXPLORE_LIMIT = int(os.getenv("DAILY_GLOBAL_EXPLORE_LIMIT", "150"))
+_GLOBAL_USER_ID = "_global"
 
 
-def _hash_otp(email: str, code: str) -> str:
-    msg = f"{email.lower().strip()}|{code.strip()}".encode("utf-8")
-    return hmac.new(SESSION_SECRET, msg, hashlib.sha256).hexdigest()
+def _get_client_ip(request: Request) -> str:
+    """Return the real client IP, handling proxies (Vercel, etc.)."""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
-async def _send_email_otp(email: str, code: str) -> None:
+def _ip_to_id(ip: str) -> str:
+    """Hash the IP with HMAC-SHA256 so raw IPs are never stored."""
+    return hmac.new(SESSION_SECRET, ip.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+async def get_ip_user_id(request: Request) -> str:
+    """Return the HMAC-hashed IP to use as ``user_id`` in quota tables."""
+    return _ip_to_id(_get_client_ip(request))
+
+
+async def enforce_global_quota(add_hf_tokens: int = 0, add_explore: int = 0) -> None:
     """
-    Uses Resend if configured; otherwise prints to logs (dev).
+    Check and increment the service-wide daily quota (key ``_global``).
+
+    Raises HTTP 429 when the combined usage of all IPs would exceed
+    ``DAILY_GLOBAL_HF_TOKEN_LIMIT`` or ``DAILY_GLOBAL_EXPLORE_LIMIT``.
+    This is the last line of defence against proxy-based quota exhaustion.
     """
-    if not RESEND_API_KEY:
-        print(f"[DEV OTP] email={email} code={code}")
-        return
+    hf_used, _, explore_used = await usage_get(_GLOBAL_USER_ID)
 
-    payload = {
-        "from": EMAIL_FROM,
-        "to": [email],
-        "subject": "Your Plant-Med sign-in code",
-        "text": f"Your sign-in code is: {code}\n\nThis code expires in {AUTH_OTP_TTL_SECONDS // 60} minutes.",
-    }
-    headers = {"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"}
+    if hf_used + add_hf_tokens > DAILY_GLOBAL_HF_TOKEN_LIMIT:
+        raise HTTPException(status_code=429, detail="The service has reached its daily limit. Come back tomorrow — quotas reset at midnight UTC.")
+    if explore_used + add_explore > DAILY_GLOBAL_EXPLORE_LIMIT:
+        raise HTTPException(status_code=429, detail="The service has reached its daily exploration limit. Come back tomorrow — quotas reset at midnight UTC.")
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post("https://api.resend.com/emails", headers=headers, json=payload)
-        r.raise_for_status()
-
-
-async def require_user(request: Request) -> str:
-    sid = (request.cookies.get(AUTH_SESSION_COOKIE) or "").strip()
-    if not sid:
-        raise HTTPException(status_code=401, detail="Sign-in required")
-
-    row = await auth_get_session(sid)
-    if not row:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    user_id, expires_at = str(row[0]), int(row[1])
-    if time.time() >= expires_at:
-        raise HTTPException(status_code=401, detail="Session expired")
-
-    return user_id
+    await usage_add(_GLOBAL_USER_ID, add_hf_tokens=add_hf_tokens, add_explore=add_explore)
 
 
 async def enforce_quota(
@@ -222,117 +223,37 @@ async def enforce_quota(
     add_turso_ops: int = 1,
     add_explore: int = 0,
 ) -> None:
+    """
+    Check and increment the per-IP daily quota.
+
+    All three counters (HF tokens, Turso operations, explore calls) are
+    checked atomically before being incremented, so a single over-limit
+    call never silently consumes quota.
+    """
     hf_used, turso_used, explore_used = await usage_get(user_id)
 
     if hf_used + add_hf_tokens > DAILY_HF_TOKEN_LIMIT:
-        raise HTTPException(status_code=429, detail="Daily LLM token quota exceeded")
+        raise HTTPException(status_code=429, detail="Your quota for today is reached. Come back tomorrow — quotas reset at midnight UTC.")
     if turso_used + add_turso_ops > DAILY_TURSO_OP_LIMIT:
-        raise HTTPException(status_code=429, detail="Daily database quota exceeded")
+        raise HTTPException(status_code=429, detail="Your quota for today is reached. Come back tomorrow — quotas reset at midnight UTC.")
     if explore_used + add_explore > DAILY_EXPLORE_LIMIT:
-        raise HTTPException(status_code=429, detail="Daily explore quota exceeded")
+        raise HTTPException(status_code=429, detail="Your daily exploration quota is reached. Come back tomorrow — quotas reset at midnight UTC.")
 
     await usage_add(user_id, add_hf_tokens=add_hf_tokens, add_turso_ops=add_turso_ops, add_explore=add_explore)
 
 
 def _estimate_tokens(text: str) -> int:
-    # rough heuristic: ~4 chars/token
+    """Rough token estimate: ~4 characters per token (GPT-style heuristic)."""
     n = len(text or "")
     return max(1, (n + 3) // 4)
 
 
-class AuthRequestCode(BaseModel):
-    email: str
-
-
-class AuthVerifyCode(BaseModel):
-    email: str
-    code: str
-
-
-@router.post("/auth/request_code")
-async def auth_request_code(payload: AuthRequestCode, _: None = Depends(require_human)):
-    email = (payload.email or "").strip().lower()
-    if not _valid_email(email):
-        raise HTTPException(status_code=400, detail="Invalid email")
-
-    code = f"{secrets.randbelow(1000000):06d}"
-    code_hash = _hash_otp(email, code)
-    expires_at = int(time.time()) + AUTH_OTP_TTL_SECONDS
-
-    await auth_upsert_otp(email, code_hash, expires_at)
-    await _send_email_otp(email, code)
-
-    return {"ok": True}
-
-
-@router.post("/auth/verify_code")
-async def auth_verify_code(payload: AuthVerifyCode, request: Request, _: None = Depends(require_human)):
-    email = (payload.email or "").strip().lower()
-    code = (payload.code or "").strip()
-
-    if not _valid_email(email):
-        raise HTTPException(status_code=400, detail="Invalid email")
-    if (not code.isdigit()) or len(code) != 6:
-        raise HTTPException(status_code=400, detail="Invalid code")
-
-    row = await auth_get_otp(email)
-    if not row:
-        raise HTTPException(status_code=401, detail="Code not found")
-
-    code_hash_db, expires_at, attempts = str(row[0]), int(row[1]), int(row[2] or 0)
-
-    if time.time() >= expires_at:
-        await auth_delete_otp(email)
-        raise HTTPException(status_code=401, detail="Code expired")
-
-    if attempts >= 8:
-        await auth_delete_otp(email)
-        raise HTTPException(status_code=429, detail="Too many attempts")
-
-    if not hmac.compare_digest(code_hash_db, _hash_otp(email, code)):
-        await auth_inc_otp_attempts(email)
-        raise HTTPException(status_code=401, detail="Incorrect code")
-
-    # success
-    await auth_delete_otp(email)
-
-    user = await auth_get_user_by_email(email)
-    if user:
-        user_id = str(user[0])
-    else:
-        user_id = await auth_create_user(email)
-
-    await auth_touch_last_login(user_id)
-
-    session_id = str(uuid.uuid4())
-    sess_exp = int(time.time()) + AUTH_SESSION_TTL_SECONDS
-    await auth_create_session(session_id, user_id, sess_exp)
-
-    resp = JSONResponse({"ok": True})
-
-    is_https = (request.url.scheme or "").lower() == "https"
-    secure_flag = bool(getattr(settings, "COOKIE_SECURE", False)) or is_https
-
-    resp.set_cookie(
-        AUTH_SESSION_COOKIE,
-        session_id,
-        max_age=AUTH_SESSION_TTL_SECONDS,
-        httponly=True,
-        samesite="lax",
-        secure=secure_flag,
-        path="/",
-    )
-    return resp
-
-
 @router.get("/auth/me")
-async def auth_me(user_id: str = Depends(require_user), _: None = Depends(require_human)):
-    # tiny quota tick (DB)
-    await enforce_quota(user_id, add_turso_ops=1)
+async def auth_me(request: Request, _: None = Depends(require_human)):
+    user_id = await get_ip_user_id(request)
     hf_used, turso_used, explore_used = await usage_get(user_id)
     return {
         "ok": True,
-        "user_id": user_id,
         "usage": {
             "hf_tokens_used": hf_used,
             "hf_tokens_limit": DAILY_HF_TOKEN_LIMIT,
@@ -342,19 +263,6 @@ async def auth_me(user_id: str = Depends(require_user), _: None = Depends(requir
             "explore_limit": DAILY_EXPLORE_LIMIT,
         },
     }
-
-
-@router.post("/auth/logout")
-async def auth_logout(request: Request, _: None = Depends(require_human)):
-    sid = (request.cookies.get(AUTH_SESSION_COOKIE) or "").strip()
-    if sid:
-        try:
-            await auth_delete_session(sid)
-        except Exception:
-            pass
-    resp = JSONResponse({"ok": True})
-    resp.delete_cookie(AUTH_SESSION_COOKIE, path="/")
-    return resp
 
 
 # ---------------------------------------------------------------------
@@ -371,6 +279,7 @@ _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
 
 def _clean_text(s: str) -> str:
+    """Strip non-printable characters from LLM output, keeping newlines and tabs."""
     return "".join(ch for ch in s if ch in ("\n", "\t") or ord(ch) >= 32)
 
 
@@ -379,6 +288,7 @@ async def _llm_chat(
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> str:
+    """Send a blocking chat-completion request to Hugging Face and return the text response."""
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN missing")
 
@@ -409,6 +319,7 @@ async def _llm_chat_stream(
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> AsyncIterator[str]:
+    """Stream chat-completion tokens from Hugging Face, yielding each text chunk as it arrives."""
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN missing")
 
@@ -459,11 +370,13 @@ async def _llm_chat_stream(
 # Helpers: chunking abstracts
 # ---------------------------------------------------------------------
 def _sentence_split(text: str) -> List[str]:
+    """Split text into sentences on sentence-ending punctuation."""
     sents = re.split(r"(?<=[.!?])\s+", (text or "").strip())
     return [s for s in sents if s]
 
 
 def _chunk_text_sentence_safe(txt: str, max_len: int = 800) -> List[str]:
+    """Split text into chunks of at most ``max_len`` characters without breaking sentences."""
     sentences = _sentence_split(txt)
     chunks: List[str] = []
     current = ""
@@ -480,6 +393,7 @@ def _chunk_text_sentence_safe(txt: str, max_len: int = 800) -> List[str]:
 
 
 def _make_corpus(doc: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Build a list of labelled text chunks (title + abstract) from a PubMed article dict."""
     items: List[Dict[str, str]] = []
     if doc.get("title"):
         items.append({"id": "title", "text": doc["title"]})
@@ -496,9 +410,10 @@ PLANTS_DB = load_plants(Path(__file__).resolve().parent.parent / "data" / "seed_
 
 
 # ---------------------------------------------------------------------
-# Condition correction via Turso cache (your existing logic)
+# Condition correction via Turso cache then LLM fallback
 # ---------------------------------------------------------------------
 def normalize_condition(s: str) -> str:
+    """Lowercase and collapse whitespace in a condition string for consistent cache lookups."""
     s = (s or "").strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -528,28 +443,40 @@ SET condition = excluded.condition,
 
 
 async def _expand_condition_with_llm(cond: str) -> str:
+    """
+    Use the LLM to correct spelling or expand abbreviations in a condition name.
+
+    Returns the corrected condition string, or the original on failure.
+    The prompt is strictly constrained to a single ``CORRECTED: …`` line
+    to keep token usage minimal (~64 output tokens).
+    """
     cond = (cond or "").strip()
     if not cond:
         return ""
 
     fallback_system = (
         "You are a medical terminology assistant.\n"
-        "Your ONLY job is to correct spelling mistakes in a disease or condition name or to replace abbreviations with their full forms\n"
+        "Your job is to interpret a user-entered condition name and return the most recognised standard medical term in English.\n"
+        "This means:\n"
+        "1. Fix any spelling mistakes.\n"
+        "2. Expand abbreviations to their full medical name.\n"
+        "3. Return the most specific and standard clinical term for what the user most likely meant.\n"
+        "   Example: 'colesterol' → 'hypercholesterolemia'\n"
+        "   Example: 'high blood pressure' → 'hypertension'\n"
+        "   Example: 'HTN' → 'hypertension'\n"
         "\n"
         "You MUST ALWAYS answer with EXACTLY ONE LINE in this format:\n"
-        "CORRECTED: <best standard condition name in English>\n"
+        "CORRECTED: <standard medical term in English>\n"
         "\n"
         "RULES:\n"
         "- The line MUST start with 'CORRECTED: '.\n"
-        "- Do NOT add any other text.\n"
-        "- Do NOT add explanations.\n"
-        "- Do NOT add other lines.\n"
+        "- Do NOT add any other text, explanation, or additional lines.\n"
     )
 
     fallback_user = (
         f"User condition: {cond}\n\n"
-        "Correct spelling mistakes in the User condition and RETURN EXACTLY ONE LINE:\n"
-        "CORRECTED: <best condition name>"
+        "Return the most recognised standard medical term for this condition.\n"
+        "CORRECTED: <standard medical term>"
     )
 
     messages_txt = [
@@ -573,6 +500,17 @@ async def _expand_condition_with_llm(cond: str) -> str:
 
 
 async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, bool]:
+    """
+    Resolve a raw condition string to its corrected canonical form.
+
+    Strategy (cache-first to minimise LLM calls):
+      1. Look up the normalised input in ``condition_misspellings``.
+      2. On cache miss, call the LLM and persist the mapping.
+      3. Increment the search counter for the corrected condition.
+
+    Returns:
+        (corrected, search_query, used_llm)
+    """
     raw_norm = normalize_condition(raw_user_input)
     if not raw_norm:
         return "", "", False
@@ -622,9 +560,10 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
 @router.get("/condition_query")
 async def condition_query(
     condition: str = Query(..., min_length=2),
+    request: Request = None,
     _: None = Depends(require_human),
-    user_id: str = Depends(require_user),
 ):
+    user_id = await get_ip_user_id(request)
     # baseline turso quota tick
     await enforce_quota(user_id, add_turso_ops=2)
 
@@ -645,9 +584,16 @@ async def condition_query(
         print(f"[cond_api] resolve_condition_db_first error: {type(e).__name__}: {e}")
         traceback.print_exc()
 
+    # Record the search (fire-and-forget — never block the response on failure)
+    try:
+        await insert_user_search(user_id, corrected or condition)
+    except Exception:
+        pass
+
     # If LLM was used, charge HF tokens (approx)
     if used_llm:
         est = 64 + _estimate_tokens(condition)
+        await enforce_global_quota(add_hf_tokens=est)
         await enforce_quota(user_id, add_hf_tokens=est, add_turso_ops=1)
 
     medline_html = ""
@@ -675,9 +621,10 @@ async def recommendations(
     from_year: Optional[int] = Query(None, ge=1800, le=3000),
     to_year: Optional[int] = Query(None, ge=1800, le=3000),
     llm_query: Optional[str] = Query(None),
+    request: Request = None,
     _: None = Depends(require_human),
-    user_id: str = Depends(require_user),
 ):
+    user_id = await get_ip_user_id(request)
     # minimal quota tick (this endpoint does not call HF in your design)
     await enforce_quota(user_id, add_turso_ops=1)
 
@@ -740,9 +687,10 @@ async def recommendations(
 async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
+    request: Request = None,
     _: None = Depends(require_human),
-    user_id: str = Depends(require_user),
 ):
+    user_id = await get_ip_user_id(request)
     # baseline DB tick
     await enforce_quota(user_id, add_turso_ops=1)
 
@@ -769,6 +717,7 @@ async def explore_stream(
 
     # cache miss => will call HF => enforce explore + token budget now
     # (conservative estimate)
+    await enforce_global_quota(add_explore=1)
     await enforce_quota(user_id, add_explore=1, add_turso_ops=1)
 
     # 2) efetch + LLM stream
@@ -814,6 +763,7 @@ async def explore_stream(
 
     # charge HF tokens estimate once before streaming
     est_hf = _estimate_tokens(context) + 300  # output cap
+    await enforce_global_quota(add_hf_tokens=est_hf)
     await enforce_quota(user_id, add_hf_tokens=est_hf, add_turso_ops=1)
 
     raw_plant = (plant or "").strip()
@@ -829,22 +779,25 @@ async def explore_stream(
         plant_for_prompt = "all plants mentioned in the CONTEXT"
 
     _SYSTEM = (
-        "You are a health science communicator for the general as related public.\n"
-        "Your goal is to provide information from a scientific article by:\n"
-        "- following the user instructions exactly.\n"
-        "- relating KEY FINDINGS as described in the user CONTEXT section.\n"
+        "You are a health science communicator writing for the general public.\n"
+        "Your goal is to summarise key findings from a scientific article in plain, accessible language.\n"
         "\n"
-        "PRIORITY RULES:\n"
-        "1. Do NOT copy codes/identifiers.\n"
-        "2. Use simple everyday words only.\n"
+        "RULES:\n"
+        "1. Use simple, everyday words — avoid medical jargon or explain it when unavoidable.\n"
+        "2. Do NOT copy article identifiers, DOIs, or numeric codes.\n"
+        "3. Be factual and neutral — do not overstate preliminary or observational findings.\n"
+        "4. This is information only, not medical advice.\n"
     )
 
     _USER_TMPL = (
         "Study: {title} — {year} / {journal}\n\n"
         "CONTEXT:\n{context}\n\n"
-        "Write ONE paragraph of 4–6 sentences.\n"
-        "Focus on {plant}.\n"
-        "Return ONLY the paragraph."
+        "Write ONE paragraph of 4–6 sentences that:\n"
+        "- States what the study examined and how (mention the study type if stated: RCT, meta-analysis, etc.).\n"
+        "- Explains specifically how {plant} acts on or affects the condition (mechanism, effect, outcome).\n"
+        "- Quantifies the effect if the CONTEXT provides numbers (e.g. dosage, percentage improvement).\n"
+        "- Mentions any limitations or caveats if stated in the CONTEXT.\n\n"
+        "Return ONLY the paragraph, with no title, no bullet points, and no disclaimer."
     )
 
     messages = [

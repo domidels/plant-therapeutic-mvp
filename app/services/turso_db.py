@@ -1,6 +1,18 @@
-# app/services/turso_db.py
+"""
+app/services/turso_db.py
+------------------------
+Turso (LibSQL) database client and helpers.
+
+Schema overview
+~~~~~~~~~~~~~~~
+- ``pub_resume``             : LLM-generated article summaries (cache).
+- ``condition``              : Search counter per corrected condition name.
+- ``condition_misspellings`` : Cache mapping raw user input -> corrected condition.
+- ``usage_daily``            : Per-identity daily quota counters.
+                               ``user_id`` is either a hashed client IP or the
+                               reserved key ``_global`` for the service-wide ceiling.
+"""
 from __future__ import annotations
-import uuid
 import datetime
 import os
 from typing import Optional, Sequence, Any
@@ -12,6 +24,7 @@ TURSO_AUTH_TOKEN = getattr(settings, "TURSO_AUTH_TOKEN", None) or os.getenv("TUR
 
 
 def _check_cfg():
+    """Raise RuntimeError if required Turso credentials are missing."""
     if not TURSO_DATABASE_URL:
         raise RuntimeError("TURSO_DATABASE_URL missing")
     if not TURSO_AUTH_TOKEN:
@@ -42,9 +55,11 @@ async def db_fetchone(sql: str, params: Sequence[Any] = ()) -> Optional[tuple]:
 # ---------------------------------------------------------------------
 async def init_db() -> None:
     """
-    Create all required tables/indexes if missing:
-    - pub_resume + unique index
-    - condition + condition_misspellings
+    Create all required tables and indexes if they do not already exist.
+
+    Safe to call multiple times (idempotent ``CREATE … IF NOT EXISTS``).
+    Tables created: ``pub_resume``, ``condition``, ``condition_misspellings``,
+    ``usage_daily``.
     """
     # --- pub_resume (cache summaries) ---
     await db_execute(
@@ -96,38 +111,6 @@ async def init_db() -> None:
         """
     )
 
-    # --- auth_users ---
-    await db_execute("""
-        CREATE TABLE IF NOT EXISTS auth_users (
-            user_id TEXT PRIMARY KEY,
-            email TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-            last_login TEXT
-        );
-    """)
-
-    # --- auth_otp (stocke hash du code) ---
-    await db_execute("""
-        CREATE TABLE IF NOT EXISTS auth_otp (
-            email TEXT PRIMARY KEY,
-            code_hash TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-        );
-    """)
-
-    # --- auth_sessions ---
-    await db_execute("""
-        CREATE TABLE IF NOT EXISTS auth_sessions (
-            session_id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-    );
-    """)
-    await db_execute("""CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id ON auth_sessions(user_id);""")
-
     # --- usage_daily ---
     await db_execute("""
         CREATE TABLE IF NOT EXISTS usage_daily (
@@ -141,11 +124,33 @@ async def init_db() -> None:
     """)
     await db_execute("""CREATE INDEX IF NOT EXISTS idx_usage_daily_user ON usage_daily(user_id);""")
 
+    # --- user_sessions (one row per hashed IP) ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            user_id     TEXT PRIMARY KEY,
+            first_seen  TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            last_seen   TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            visit_count INTEGER NOT NULL DEFAULT 1
+        );
+    """)
+
+    # --- user_searches (one row per condition query) ---
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS user_searches (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     TEXT NOT NULL,
+            condition   TEXT NOT NULL,
+            searched_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
+    """)
+    await db_execute("""CREATE INDEX IF NOT EXISTS idx_user_searches_user ON user_searches(user_id);""")
+
 
 # ---------------------------------------------------------------------
 # pub_resume functions
 # ---------------------------------------------------------------------
 async def get_resume_by_pub_id(pub_id: str) -> Optional[str]:
+    """Return the cached LLM summary for a PubMed article, or None if not cached yet."""
     row = await db_fetchone(
         "SELECT resume FROM pub_resume WHERE pub_id = ? LIMIT 1;",
         (pub_id,),
@@ -154,6 +159,7 @@ async def get_resume_by_pub_id(pub_id: str) -> Optional[str]:
 
 
 async def increment_searched(pub_id: str) -> None:
+    """Increment the ``searched`` hit counter for a cached article summary."""
     await db_execute(
         "UPDATE pub_resume SET searched = COALESCE(searched, 0) + 1 WHERE pub_id = ?;",
         (pub_id,),
@@ -161,6 +167,7 @@ async def increment_searched(pub_id: str) -> None:
 
 
 async def insert_resume(pub_id: str, resume: str) -> None:
+    """Insert a new LLM-generated summary into the cache (``searched`` initialised to 1)."""
     await db_execute(
         """
         INSERT INTO pub_resume (pub_id, resume, searched)
@@ -170,104 +177,53 @@ async def insert_resume(pub_id: str, resume: str) -> None:
     )
 
 
-async def upsert_increment_or_insert(pub_id: str, resume_if_insert: str) -> None:
+
+
+# ---------------------------
+# Session tracking
+# ---------------------------
+async def upsert_user_session(user_id: str) -> None:
     """
-    UPSERT:
-    - if exists: increment searched
-    - else: insert resume + searched=1
-    Requires unique constraint on pub_id (pub_id_uq_idx).
+    Record a visit for ``user_id`` (hashed IP).
+
+    Creates a row on first visit; on subsequent visits increments
+    ``visit_count`` and updates ``last_seen``.
     """
     await db_execute(
         """
-        INSERT INTO pub_resume (pub_id, resume, searched)
-        VALUES (?, ?, 1)
-        ON CONFLICT(pub_id) DO UPDATE SET
-          searched = COALESCE(pub_resume.searched, 0) + 1;
+        INSERT INTO user_sessions(user_id, first_seen, last_seen, visit_count)
+        VALUES(?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+        ON CONFLICT(user_id) DO UPDATE SET
+            last_seen   = CURRENT_TIMESTAMP,
+            visit_count = visit_count + 1;
         """,
-        (pub_id, resume_if_insert),
-    )
-    
-def _utc_day_str() -> str:
-    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
-
-
-# ---------------------------
-# Auth helpers
-# ---------------------------
-async def auth_get_user_by_email(email: str) -> Optional[tuple]:
-    return await db_fetchone(
-        "SELECT user_id, email FROM auth_users WHERE email=? LIMIT 1;",
-        (email,),
-    )
-
-
-async def auth_create_user(email: str) -> str:
-    user_id = str(uuid.uuid4())
-    await db_execute("INSERT INTO auth_users(user_id, email) VALUES(?, ?);", (user_id, email))
-    return user_id
-
-
-async def auth_touch_last_login(user_id: str) -> None:
-    await db_execute(
-        "UPDATE auth_users SET last_login=CURRENT_TIMESTAMP WHERE user_id=?;",
         (user_id,),
     )
 
 
-async def auth_upsert_otp(email: str, code_hash: str, expires_at: int) -> None:
+async def insert_user_search(user_id: str, condition: str) -> None:
+    """Record a condition search for ``user_id``."""
     await db_execute(
-        """
-        INSERT INTO auth_otp(email, code_hash, expires_at, attempts)
-        VALUES(?, ?, ?, 0)
-        ON CONFLICT(email) DO UPDATE SET
-          code_hash=excluded.code_hash,
-          expires_at=excluded.expires_at,
-          attempts=0;
-        """,
-        (email, code_hash, expires_at),
+        "INSERT INTO user_searches(user_id, condition) VALUES(?, ?);",
+        (user_id, condition),
     )
 
 
-async def auth_get_otp(email: str) -> Optional[tuple]:
-    return await db_fetchone(
-        "SELECT code_hash, expires_at, attempts FROM auth_otp WHERE email=? LIMIT 1;",
-        (email,),
-    )
-
-
-async def auth_inc_otp_attempts(email: str) -> None:
-    await db_execute(
-        "UPDATE auth_otp SET attempts=attempts+1 WHERE email=?;",
-        (email,),
-    )
-
-
-async def auth_delete_otp(email: str) -> None:
-    await db_execute("DELETE FROM auth_otp WHERE email=?;", (email,))
-
-
-async def auth_create_session(session_id: str, user_id: str, expires_at: int) -> None:
-    await db_execute(
-        "INSERT INTO auth_sessions(session_id, user_id, expires_at) VALUES(?, ?, ?);",
-        (session_id, user_id, expires_at),
-    )
-
-
-async def auth_get_session(session_id: str) -> Optional[tuple]:
-    return await db_fetchone(
-        "SELECT user_id, expires_at FROM auth_sessions WHERE session_id=? LIMIT 1;",
-        (session_id,),
-    )
-
-
-async def auth_delete_session(session_id: str) -> None:
-    await db_execute("DELETE FROM auth_sessions WHERE session_id=?;", (session_id,))
+def _utc_day_str() -> str:
+    """Return today's date in ``YYYY-MM-DD`` UTC format for quota bucketing."""
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d")
 
 
 # ---------------------------
 # Usage / quota helpers
 # ---------------------------
 async def usage_get(user_id: str) -> tuple[int, int, int]:
+    """
+    Return today's quota counters for ``user_id`` as ``(hf_tokens, turso_ops, explore_calls)``.
+
+    Creates a zeroed row for today if none exists yet.
+    ``user_id`` is either a hashed client IP or ``_global`` for the service-wide counter.
+    """
     day = _utc_day_str()
     row = await db_fetchone(
         "SELECT hf_tokens, turso_ops, explore_calls FROM usage_daily WHERE user_id=? AND day=? LIMIT 1;",
@@ -283,6 +239,7 @@ async def usage_get(user_id: str) -> tuple[int, int, int]:
 
 
 async def usage_add(user_id: str, add_hf_tokens: int = 0, add_turso_ops: int = 0, add_explore: int = 0) -> None:
+    """Atomically increment today's quota counters for ``user_id`` using an UPSERT."""
     day = _utc_day_str()
     await db_execute(
         """
