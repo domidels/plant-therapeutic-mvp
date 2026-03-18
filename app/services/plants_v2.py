@@ -5,7 +5,7 @@ import unicodedata
 import regex as re  # pip install regex
 
 # ---------------------------------------------------------
-#           CONSTANTES DE CONTEXTE ET DÉSAMBIGUÏSATION
+#           CONTEXT & DISAMBIGUATION CONSTANTS
 # ---------------------------------------------------------
 
 CONTEXT_WORDS = {
@@ -14,30 +14,38 @@ CONTEXT_WORDS = {
     "cream", "topical", "plant", "compound"
 }
 
-# Motifs de toxicité vraiment dangereux (on a volontairement retiré "adverse events")
+# Keywords signalling genuine toxicity / adverse outcomes
 NEGATIVE_KEYWORDS = {
     "toxicity", "toxic", "poisoning", "poison", "overdose",
-    "induced liver injury", "liver injury", "hepatotoxicity",
+    "induced liver injury", "liver injury", "liver damage", "hepatotoxicity", "hepatotoxic",
     "harmful", "damage", "injury", "drug-induced",
-    "herb-induced", "herbal-induced","disorder", "death", "fatal"
+    "herb-induced", "herbal-induced", "disorder", "death", "fatal",
+    "implicating",
+    "adverse drug reaction", "adverse reaction",
+    "side effect",
+    "risk of bleeding",
+    "drug interaction",
+    "safety concern",
+    "fatal outcome",
+    "suspected",
 }
 
-# Contextes typiques du groupe contrôle/placebo
-# NB: on NE met plus "placebo" tout seul ici, pour éviter les énumérations de bras.
+# Typical control/placebo group contexts
+# NOTE: "placebo" alone is intentionally excluded to avoid false positives on arm-enumeration sentences.
 CONTROL_KEYWORDS = {
     "control group", "controls", "placebo group", "vehicle", "carrier oil",
     "base oil", "odourless", "neutral oil", "standard care",
     "sham", "matched placebo"
 }
 
-# Alias ambigus qui exigent contexte
+# Ambiguous aliases that require surrounding context before being accepted
 AMBIGUOUS = {
     "sage", "rheum", "mate", "maca", "tea", "bay", "cola", "pepper", "willow",
     "nettle", "licorice", "ginseng", "cbd"
 }
 
 # ---------------------------------------------------------
-#                   FONCTIONS GÉNÉRIQUES
+#                   GENERIC HELPERS
 # ---------------------------------------------------------
 
 def strip_accents(s: str) -> str:
@@ -54,7 +62,7 @@ def norm(s: str) -> str:
     return s
 
 def token_regex(term: str) -> str:
-    """Construit un motif robuste qui capture l'alias sans capture de sous-chaîne interne."""
+    """Build a robust regex pattern that matches the alias as a whole token (no substring captures)."""
     parts = [re.escape(p) for p in re.split(r"[\s\-_/]+", term) if p]
     inner = r"[-\s_]*".join(parts)
     return rf"(?<![\p{{L}}\p{{N}}]){inner}(?![\p{{L}}\p{{N}}])"
@@ -66,7 +74,7 @@ def near_context(tokens: List[str], idx: int, window: int = 4) -> bool:
 
 
 # ---------------------------------------------------------
-#      CHARGEMENT DU CSV & NETTOYAGE DES PLANTES IMBRIQUÉES
+#      CSV LOADING & NESTED-PLANT CLEANUP
 # ---------------------------------------------------------
 
 def load_plants(csv_path: Path) -> List[Dict]:
@@ -87,7 +95,7 @@ def load_plants(csv_path: Path) -> List[Dict]:
     return plants
 
 def _filter_nested_plants(plants: List[str]) -> List[str]:
-    """Supprime les canoniques dont le nom est entièrement contenu dans un autre plus long."""
+    """Remove canonical names that are entirely contained within a longer canonical name."""
     sorted_plants = sorted(plants, key=len, reverse=True)
     kept = []
     for p in sorted_plants:
@@ -98,15 +106,15 @@ def _filter_nested_plants(plants: List[str]) -> List[str]:
 
 
 # ---------------------------------------------------------
-#         DÉCOUPAGE EN CLAUSES POUR LE CONTEXTE
+#         CLAUSE SPLITTING FOR CONTEXT ANALYSIS
 # ---------------------------------------------------------
 
 def _split_clauses(text: str) -> List[str]:
     """
-    Découpage robuste :
-      - phrases (.?!)
-      - connecteurs de contraste (while, although, whereas…)
-      - gère : "While X, Y."
+    Robust clause splitting:
+      - sentence boundaries (.?!)
+      - contrast connectors (while, although, whereas…)
+      - handles: "While X, Y."
     """
     t = norm(text)
     sentences = re.split(r'(?<=[.!?])\s+', t)
@@ -123,7 +131,7 @@ def _split_clauses(text: str) -> List[str]:
         if not s:
             continue
 
-        # Cas d'un connecteur en début de phrase
+        # Connector at the start of the sentence — split on the first comma
         if re.match(connector_start, s):
             idx = s.find(',')
             if idx != -1:
@@ -135,7 +143,7 @@ def _split_clauses(text: str) -> List[str]:
                     clauses.append(rest)
                 continue
 
-        # Sinon découpe sur connecteurs internes
+        # Otherwise split on internal contrast connectors
         s_marked = re.sub(connector_mid, r' <SEP>\1', s)
         parts = [p.strip() for p in s_marked.split("<SEP>") if p.strip()]
         clauses.extend(parts)
@@ -144,14 +152,14 @@ def _split_clauses(text: str) -> List[str]:
 
 
 # ---------------------------------------------------------
-#      HEURISTIQUES DE CONTEXTE (groupe / traitement contrôle)
+#      CONTEXT HEURISTICS (control / placebo group detection)
 # ---------------------------------------------------------
 
 def _is_group_enumeration_clause(c_norm: str) -> bool:
     """
-    Heuristique : clause de type "participants were randomly allocated
-    to one of three groups: X, Y, or placebo."
-    On ne veut PAS marquer les plantes comme 'control' dans ce cas.
+    Heuristic: detect arm-enumeration clauses such as
+    "participants were randomly allocated to one of three groups: X, Y, or placebo."
+    Plants mentioned here should NOT be flagged as 'control'.
     """
     has_randomization = bool(
         re.search(r"\b(allocated|assigned|randomized|randomised|divided)\b", c_norm)
@@ -164,8 +172,8 @@ def _is_group_enumeration_clause(c_norm: str) -> bool:
 
 def _describes_control_treatment(c_norm: str) -> bool:
     """
-    Heuristique : clause décrivant un traitement reçu par un groupe contrôle/placebo,
-    ex. "patients in the placebo group received neutral oil".
+    Heuristic: detect clauses that describe a treatment received by a control/placebo group,
+    e.g. "patients in the placebo group received neutral oil".
     """
     has_group = (
         "control group" in c_norm
@@ -179,11 +187,11 @@ def _describes_control_treatment(c_norm: str) -> bool:
 
 
 # ---------------------------------------------------------
-#      ANALYSE DE CONTEXTE (toxique / contrôle)
+#      CONTEXT CLASSIFICATION (toxicity / control)
 # ---------------------------------------------------------
 
 def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
-    """Analyse clause par clause : toxicité et contrôle."""
+    """Classify each detected plant clause by clause for toxicity and control signals."""
     clauses = _split_clauses(text)
     ctx = {p: {"negative": False, "control": False} for p in plants}
 
@@ -205,18 +213,18 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
         if not plants_here:
             continue
 
-        # Toxicité : simple présence d'un motif
+        # Toxicity: keyword presence is sufficient
         has_neg = any(k in c_norm for k in NEGATIVE_KEYWORDS)
 
-        # Contrôle : heuristique plus fine
+        # Control group: apply finer heuristics
         if _is_group_enumeration_clause(c_norm):
-            # Énumération de bras (M. piperita, E. cardamomum, placebo) → pas un contexte contrôle
+            # Arm enumeration (M. piperita, E. cardamomum, placebo) → not a control context
             has_ctrl = False
         elif _describes_control_treatment(c_norm):
-            # Description explicite du traitement du placebo / control group
+            # Explicit description of what the placebo / control group received
             has_ctrl = True
         else:
-            # Fallback : motifs "contrôle" génériques (neutral oil, matched placebo, etc.)
+            # Fallback: generic control keywords (neutral oil, matched placebo, etc.)
             has_ctrl = any(k in c_norm for k in CONTROL_KEYWORDS)
 
         for can in plants_here:
@@ -229,10 +237,10 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
 
 def _filter_by_context(text: str, plants: List[str], plant_db: List[Dict]) -> List[str]:
     """
-    Règles finales :
-       - exclure les plantes toxiques
-       - exclure les plantes purement contrôle/placebo
-       - garder tout le reste (PAS de logique positive)
+    Final filtering rules:
+       - exclude plants appearing only in toxic/adverse contexts
+       - exclude plants appearing only as control/placebo
+       - keep everything else (no positive-signal requirement)
     """
     ctx = _classify_context(text, plants, plant_db)
     out = []
@@ -252,23 +260,23 @@ def _filter_by_context(text: str, plants: List[str], plant_db: List[Dict]) -> Li
 
 
 # ---------------------------------------------------------
-#      PIPELINE PRINCIPAL : DÉTECTION DANS LE TEXTE
+#      MAIN PIPELINE: PLANT DETECTION IN TEXT
 # ---------------------------------------------------------
 
 def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
     """
-    Pipeline complet :
-      1) détection lexicale robuste (binômes, alias, ambiguïtés)
-      2) suppression des noms imbriqués
-      3) filtrage toxique / contrôle
-    Version instrumentée avec prints.
+    Full detection pipeline:
+      1) robust lexical matching (Latin binomials, aliases, ambiguous terms)
+      2) nested-name deduplication
+      3) toxicity / control filtering
+    Instrumented with debug prints.
     """
 
     t = norm(text)
     tokens = t.split()
     hits: List[str] = []
 
-    print("---- ÉTAPE 1 : DÉTECTION LEXICALE ----")
+    print("---- STEP 1: LEXICAL DETECTION ----")
 
     for p in plant_db:
         can = p["canonical"]
@@ -276,22 +284,22 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
 
         found = False
 
-        # binôme latin
+        # Check whether any alias is a Latin binomial (two words)
         has_binomial = any(
             re.match(r"^[a-z]+(?:[\s\-_]+)[a-z]+$", a)
             for a in norm_aliases
         )
 
-        # 1) binôme latin prioritaire
+        # 1) Latin binomial takes priority
         if has_binomial:
             for term in norm_aliases:
                 if re.match(r"^[a-z]+(?:[\s\-_]+)[a-z]+$", term):
                     if re.search(token_regex(term), t, flags=re.IGNORECASE):
-                        print(term, "      ✔ MATCH BINÔME LATIN")
+                        print(term, "      ✔ LATIN BINOMIAL MATCH")
                         found = True
                         break
 
-        # 2) alias communs
+        # 2) Common aliases
         if not found:
             for term in norm_aliases:
                 m = re.search(token_regex(term), t, flags=re.IGNORECASE)
@@ -300,13 +308,13 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
 
                 base = term.split()[0] if " " in term else term
 
-                # alias ambigu ⇒ contexte requis
+                # Ambiguous alias: surrounding context required
                 if base in AMBIGUOUS or term in AMBIGUOUS:
                     start = m.start()
                     idx = len(norm(t[:start]).split())
-                    print(term, f"      (ambigü) index={idx}, recherche contexte…")
+                    print(term, f"      (ambiguous) index={idx}, checking context…")
                     if near_context(tokens, idx, window=3):
-                        print("      ✔ contexte trouvé → accepté")
+                        print("      ✔ context found → accepted")
                         found = True
                         break
                     else:
@@ -318,7 +326,7 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
         if found:
             hits.append(can)
 
-    # dédoublonnage
+    # Deduplicate while preserving order
     seen = set()
     out = []
     for h in hits:
@@ -326,23 +334,23 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
             out.append(h)
             seen.add(h)
 
-    print("\n---- ÉTAPE 2 : SUPPRESSION DES NOMS IMBRIQUÉS ----")
-    print("avant _filter_nested_plants:", out)
+    print("\n---- STEP 2: NESTED NAME REMOVAL ----")
+    print("before _filter_nested_plants:", out)
     filtered_nested = _filter_nested_plants(out)
-    print("après  _filter_nested_plants:", filtered_nested)
+    print("after  _filter_nested_plants:", filtered_nested)
 
     out = filtered_nested
 
-    # 3) filtre toxique + contrôle
+    # 3) Toxicity + control filter
     if out:
-        print("\n---- ÉTAPE 3 : FILTRAGE toxique + contrôle ----")
-        print("avant _filter_by_context:", out)
+        print("\n---- STEP 3: TOXICITY + CONTROL FILTER ----")
+        print("before _filter_by_context:", out)
         filtered_context = _filter_by_context(text, out, plant_db)
-        print("après  _filter_by_context:", filtered_context)
+        print("after  _filter_by_context:", filtered_context)
         out = filtered_context
     else:
-        print("\n---- ÉTAPE 3 : (skipped) aucune plante à filtrer ----")
+        print("\n---- STEP 3: (skipped) no plants to filter ----")
 
-    print("\n==================== FIN DEBUG find_plants_in_text ====================\n")
+    print("\n==================== END DEBUG find_plants_in_text ====================\n")
 
     return out
