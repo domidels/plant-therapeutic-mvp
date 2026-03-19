@@ -69,7 +69,8 @@ async def init_db() -> None:
             pub_id TEXT NOT NULL,
             resume TEXT,
             insertion_date TEXT DEFAULT CURRENT_TIMESTAMP,
-            searched INTEGER DEFAULT 0
+            searched INTEGER DEFAULT 0,
+            verdict INTEGER DEFAULT NULL
         );
         """
     )
@@ -80,6 +81,12 @@ async def init_db() -> None:
         ON pub_resume(pub_id);
         """
     )
+
+    # Add verdict column to existing databases (ignored if already present)
+    try:
+        await db_execute("ALTER TABLE pub_resume ADD COLUMN verdict INTEGER DEFAULT NULL;")
+    except Exception:
+        pass
 
     # --- condition (search counter per corrected condition) ---
     await db_execute(
@@ -149,13 +156,17 @@ async def init_db() -> None:
 # ---------------------------------------------------------------------
 # pub_resume functions
 # ---------------------------------------------------------------------
-async def get_resume_by_pub_id(pub_id: str) -> Optional[str]:
-    """Return the cached LLM summary for a PubMed article, or None if not cached yet."""
+async def get_resume_by_pub_id(pub_id: str) -> Optional[tuple]:
+    """
+    Return ``(resume_text, verdict)`` for a cached article, or ``None`` if not cached.
+
+    ``verdict`` is ``1`` (negative), ``0`` (positive/neutral), or ``None`` (unknown).
+    """
     row = await db_fetchone(
-        "SELECT resume FROM pub_resume WHERE pub_id = ? LIMIT 1;",
+        "SELECT resume, verdict FROM pub_resume WHERE pub_id = ? LIMIT 1;",
         (pub_id,),
     )
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 async def increment_searched(pub_id: str) -> None:
@@ -166,14 +177,31 @@ async def increment_searched(pub_id: str) -> None:
     )
 
 
-async def insert_resume(pub_id: str, resume: str) -> None:
-    """Insert a new LLM-generated summary into the cache (``searched`` initialised to 1)."""
+async def get_negative_pub_ids(pub_ids: list[str]) -> set[str]:
+    """Return the subset of ``pub_ids`` that have ``verdict = 1`` in ``pub_resume``."""
+    if not pub_ids:
+        return set()
+    placeholders = ",".join("?" * len(pub_ids))
+    _check_cfg()
+    async with create_client(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as db:
+        rs = await db.execute(
+            f"SELECT pub_id FROM pub_resume WHERE verdict = 1 AND pub_id IN ({placeholders});",
+            tuple(pub_ids),
+        )
+        return {row[0] for row in (rs.rows or [])}
+
+
+async def insert_resume(pub_id: str, resume: str, verdict: Optional[int] = None) -> None:
+    """Insert a new LLM-generated summary into the cache (``searched`` initialised to 1).
+
+    ``verdict``: ``1`` = negative context, ``0`` = positive/neutral, ``None`` = unknown.
+    """
     await db_execute(
         """
-        INSERT INTO pub_resume (pub_id, resume, searched)
-        VALUES (?, ?, 1);
+        INSERT INTO pub_resume (pub_id, resume, searched, verdict)
+        VALUES (?, ?, 1, ?);
         """,
-        (pub_id, resume),
+        (pub_id, resume, verdict),
     )
 
 

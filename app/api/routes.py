@@ -41,6 +41,7 @@ from app.services.turso_db import (
     get_resume_by_pub_id,
     increment_searched,
     insert_resume,
+    get_negative_pub_ids,
     # generic db helpers
     db_fetchone,
     db_execute,
@@ -442,41 +443,43 @@ SET condition = excluded.condition,
 """
 
 
-async def _expand_condition_with_llm(cond: str) -> str:
+async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str]]:
     """
-    Use the LLM to correct spelling or expand abbreviations in a condition name.
+    Use the LLM to correct spelling and return synonyms for a condition name.
 
-    Returns the corrected condition string, or the original on failure.
-    The prompt is strictly constrained to a single ``CORRECTED: …`` line
-    to keep token usage minimal (~64 output tokens).
+    Returns ``(corrected, synonyms)`` where ``synonyms`` is a list of alternative
+    clinical terms and MeSH synonyms to broaden the PubMed search.
+    Falls back to ``(original, [])`` on failure.
     """
     cond = (cond or "").strip()
     if not cond:
-        return ""
+        return "", []
 
     fallback_system = (
         "You are a medical terminology assistant.\n"
-        "Your job is to interpret a user-entered condition name and return the most recognised standard medical term in English.\n"
-        "This means:\n"
-        "1. Fix any spelling mistakes.\n"
-        "2. Expand abbreviations to their full medical name.\n"
-        "3. Return the most specific and standard clinical term for what the user most likely meant.\n"
-        "   Example: 'colesterol' → 'hypercholesterolemia'\n"
-        "   Example: 'high blood pressure' → 'hypertension'\n"
-        "   Example: 'HTN' → 'hypertension'\n"
+        "Your job is to interpret a user-entered condition name and return:\n"
+        "1. The most recognised standard medical term in English (fix spelling, expand abbreviations).\n"
+        "2. Up to 3 EXACT synonyms — different names for the SAME condition used in clinical literature.\n"
+        "   Example: 'urticaria' → synonyms: hives, urticaria chronica, allergic urticaria\n"
+        "   Example: 'HTN' → 'hypertension', synonyms: high blood pressure, arterial hypertension\n"
+        "   Example: 'colesterol' → 'hypercholesterolemia', synonyms: high cholesterol, hyperlipidemia\n"
         "\n"
-        "You MUST ALWAYS answer with EXACTLY ONE LINE in this format:\n"
-        "CORRECTED: <standard medical term in English>\n"
+        "STRICT RULES:\n"
+        "- Synonyms must refer to the EXACT SAME condition — NOT broader categories, NOT parent diseases.\n"
+        "  BAD example for 'urticaria': do NOT return 'allergic skin disease' or 'hypersensitivity reaction' (these are broader).\n"
+        "  GOOD example for 'urticaria': 'hives', 'urticaria chronica', 'nettle rash'.\n"
+        "- Do NOT add any other text or explanation.\n"
+        "- If no useful synonyms exist, write SYNONYMS: (empty)\n"
         "\n"
-        "RULES:\n"
-        "- The line MUST start with 'CORRECTED: '.\n"
-        "- Do NOT add any other text, explanation, or additional lines.\n"
+        "You MUST answer with EXACTLY TWO LINES in this format:\n"
+        "CORRECTED: <standard medical term>\n"
+        "SYNONYMS: <synonym1>, <synonym2>, <synonym3>\n"
     )
 
     fallback_user = (
         f"User condition: {cond}\n\n"
-        "Return the most recognised standard medical term for this condition.\n"
-        "CORRECTED: <standard medical term>"
+        "CORRECTED: <standard medical term>\n"
+        "SYNONYMS: <synonym1>, <synonym2>, ..."
     )
 
     messages_txt = [
@@ -485,18 +488,22 @@ async def _expand_condition_with_llm(cond: str) -> str:
     ]
 
     corrected = cond
-    raw = await _llm_chat(messages_txt, max_tokens=64, temperature=0.0)
+    synonyms: List[str] = []
+    raw = await _llm_chat(messages_txt, max_tokens=128, temperature=0.0)
     raw = _clean_text(raw).strip()
 
     for line in raw.splitlines():
         ls = line.strip()
         if ls.upper().startswith("CORRECTED:"):
-            value = ls[len("CORRECTED:") :].strip()
+            value = ls[len("CORRECTED:"):].strip()
             if value:
                 corrected = value
-                break
+        elif ls.upper().startswith("SYNONYMS:"):
+            value = ls[len("SYNONYMS:"):].strip()
+            if value and value.lower() != "(empty)":
+                synonyms = [s.strip() for s in value.split(",") if s.strip()]
 
-    return corrected
+    return corrected, synonyms
 
 
 async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, bool]:
@@ -525,12 +532,20 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
         print(f"[cond-db] lookup failed: {type(e).__name__}: {e}")
         row = None
 
+    synonyms: List[str] = []
+
     if row and row[0]:
+        # Condition already known — use cached correction, still fetch synonyms via LLM
         corrected_norm = normalize_condition(row[0])
-    else:
-        # 2) LLM fallback
         try:
-            corrected = await _expand_condition_with_llm(raw_norm)
+            _, synonyms = await _expand_condition_with_llm(corrected_norm)
+            used_llm = True
+        except Exception:
+            synonyms = []
+    else:
+        # 2) LLM fallback for both correction and synonyms
+        try:
+            corrected, synonyms = await _expand_condition_with_llm(raw_norm)
             corrected_norm = normalize_condition(corrected) or raw_norm
             used_llm = True
         except Exception as e:
@@ -551,7 +566,7 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     except Exception as e:
         print(f"[cond-db] upsert misspelling failed: {type(e).__name__}: {e}")
 
-    return corrected_norm, corrected_norm, used_llm
+    return corrected_norm, corrected_norm, used_llm, synonyms
 
 
 # ---------------------------------------------------------------------
@@ -574,9 +589,10 @@ async def condition_query(
     corrected = condition
     search_query = condition
     used_llm = False
+    synonyms: List[str] = []
 
     try:
-        corrected, search_query, used_llm = await resolve_condition_db_first(condition)
+        corrected, search_query, used_llm, synonyms = await resolve_condition_db_first(condition)
         if not corrected:
             corrected = condition
             search_query = condition
@@ -592,9 +608,13 @@ async def condition_query(
 
     # If LLM was used, charge HF tokens (approx)
     if used_llm:
-        est = 64 + _estimate_tokens(condition)
+        est = 128 + _estimate_tokens(condition)
         await enforce_global_quota(add_hf_tokens=est)
         await enforce_quota(user_id, add_hf_tokens=est, add_turso_ops=1)
+
+    # Build expanded search query including synonyms (max 3 extra terms)
+    all_terms = [corrected] + [s for s in synonyms[:3] if s.lower() != corrected.lower()]
+    search_query = " OR ".join(all_terms)
 
     medline_html = ""
     try:
@@ -610,6 +630,7 @@ async def condition_query(
     return {
         "condition": condition,
         "corrected": corrected,
+        "synonyms": synonyms,
         "search_query": search_query,
         "medline_html": medline_html,
     }
@@ -651,8 +672,20 @@ async def recommendations(
     plant_groups: Dict[str, Dict[str, Any]] = {}
 
     for a in articles:
+        # Skip articles whose parsed year falls outside the requested range.
+        # PubMed sometimes returns articles with cross-year dates (e.g. accepted 2025,
+        # published online 2026), causing duplicates across year sections.
+        art_year = a.get("year", "")
+        if art_year:
+            try:
+                y = int(art_year)
+                if y < from_year or y > to_year:
+                    continue
+            except ValueError:
+                pass
+
         text = f"{a.get('title','')} {a.get('abstract','')}"
-        plants_found = list(find_plants_in_text(text, PLANTS_DB))
+        plants_found, negative_found = find_plants_in_text(text, PLANTS_DB)
         plants_unique = sorted(set(plants_found))
         if not plants_unique:
             continue
@@ -661,9 +694,10 @@ async def recommendations(
 
         grp = plant_groups.get(group_label)
         if not grp:
-            grp = {"plants": plants_unique, "articles": []}
+            grp = {"plants": plants_unique, "articles": [], "keyword_negative": set()}
             plant_groups[group_label] = grp
         grp["articles"].append(a)
+        grp["keyword_negative"].update(negative_found)
 
     results: List[Dict[str, Any]] = []
     for label, grp in plant_groups.items():
@@ -677,9 +711,21 @@ async def recommendations(
             for a in scored[:5]
         ]
 
-        results.append({"plant": label, "score": round(plant_score, 2), "summary": summary, "top_studies": items})
+        keyword_neg = bool(grp["keyword_negative"])
+        results.append({"plant": label, "score": round(plant_score, 2), "summary": summary, "top_studies": items, "keyword_negative": keyword_neg})
 
     results.sort(key=lambda x: x["score"], reverse=True)
+
+    # Enrich results with cached verdict — single batch query
+    all_pub_ids = [f"pub_{s['pmid']}" for r in results for s in r["top_studies"] if s.get("pmid")]
+    try:
+        negative_ids = await get_negative_pub_ids(all_pub_ids)
+    except Exception:
+        negative_ids = set()
+    for r in results:
+        llm_negative = any(f"pub_{s['pmid']}" in negative_ids for s in r["top_studies"])
+        r["has_negative"] = llm_negative or r.pop("keyword_negative", False)
+
     return {"condition": condition, "search_query": search_query, "results": results}
 
 
@@ -704,14 +750,17 @@ async def explore_stream(
         cached = None
 
     if cached:
+        cached_text, cached_verdict = cached
         try:
             await increment_searched(pub_id)
         except Exception:
             pass
 
         async def gen_cached():
-            yield cached
+            yield cached_text
             yield f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+            verdict_label = "NEGATIVE" if cached_verdict == 1 else "POSITIVE"
+            yield f"\n__VERDICT:{verdict_label}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
@@ -797,7 +846,11 @@ async def explore_stream(
         "- Explains specifically how {plant} acts on or affects the condition (mechanism, effect, outcome).\n"
         "- Quantifies the effect if the CONTEXT provides numbers (e.g. dosage, percentage improvement).\n"
         "- Mentions any limitations or caveats if stated in the CONTEXT.\n\n"
-        "Return ONLY the paragraph, with no title, no bullet points, and no disclaimer."
+        "Return ONLY the paragraph, with no title, no bullet points, and no disclaimer.\n\n"
+        "Then, on the very last line, write exactly one of:\n"
+        "VERDICT:NEGATIVE  (if {plant} has an adverse, harmful or contraindicated effect in this context, "
+        "or if the condition appears only as a side effect / adverse event of the treatment)\n"
+        "VERDICT:POSITIVE  (otherwise)"
     )
 
     messages = [
@@ -817,7 +870,7 @@ async def explore_stream(
     async def event_generator():
         buf_parts: List[str] = []
         try:
-            async for chunk in _llm_chat_stream(messages, max_tokens=300, temperature=0.0):
+            async for chunk in _llm_chat_stream(messages, max_tokens=320, temperature=0.0):
                 buf_parts.append(chunk)
                 yield chunk
         except Exception as e:
@@ -831,9 +884,22 @@ async def explore_stream(
         yield refs
 
         full_resume = "".join(buf_parts).strip()
-        if full_resume:
+
+        # Parse and strip the VERDICT line the LLM appended
+        import re as _re
+        verdict = "POSITIVE"
+        clean_resume = full_resume
+        verdict_match = _re.search(r"\nVERDICT:(NEGATIVE|POSITIVE)", full_resume)
+        if verdict_match:
+            verdict = verdict_match.group(1)
+            clean_resume = full_resume[: verdict_match.start()].strip()
+
+        verdict_int = 1 if verdict == "NEGATIVE" else 0
+        yield f"\n__VERDICT:{verdict}__"
+
+        if clean_resume:
             try:
-                await insert_resume(pub_id, full_resume)
+                await insert_resume(pub_id, clean_resume, verdict_int)
             except Exception as e:
                 print(f"[turso] insert failed: {type(e).__name__}: {e}")
 

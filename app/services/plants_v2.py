@@ -22,7 +22,9 @@ NEGATIVE_KEYWORDS = {
     "herb-induced", "herbal-induced", "disorder", "death", "fatal",
     "implicating",
     "adverse drug reaction", "adverse reaction",
-    "side effect",
+    "adverse effect", "adverse effects",
+    "adverse event", "adverse events",
+    "side effect", "side effects",
     "risk of bleeding",
     "drug interaction",
     "safety concern",
@@ -235,40 +237,44 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
 
     return ctx
 
-def _filter_by_context(text: str, plants: List[str], plant_db: List[Dict]) -> List[str]:
+def _filter_by_context(text: str, plants: List[str], plant_db: List[Dict]) -> tuple:
     """
     Final filtering rules:
-       - exclude plants appearing only in toxic/adverse contexts
-       - exclude plants appearing only as control/placebo
-       - keep everything else (no positive-signal requirement)
+       - control/placebo plants are excluded entirely
+       - negative plants are kept but returned separately
+       - everything else is kept as positive/neutral
+
+    Returns ``(kept_plants, negative_plants)`` where both are lists of canonical names.
+    ``kept_plants`` includes negative ones so all non-control plants appear in results.
     """
     ctx = _classify_context(text, plants, plant_db)
-    out = []
+    kept = []
+    negative = []
 
     for p in plants:
-        neg  = ctx[p]["negative"]
-        ctrl = ctx[p]["control"]
+        if ctx[p]["control"]:
+            continue  # still exclude control/placebo
+        kept.append(p)
+        if ctx[p]["negative"]:
+            negative.append(p)
 
-        if neg:
-            continue
-        if ctrl:
-            continue
-
-        out.append(p)
-
-    return out
+    return kept, negative
 
 
 # ---------------------------------------------------------
 #      MAIN PIPELINE: PLANT DETECTION IN TEXT
 # ---------------------------------------------------------
 
-def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
+def find_plants_in_text(text: str, plant_db: List[Dict]) -> tuple:
     """
     Full detection pipeline:
       1) robust lexical matching (Latin binomials, aliases, ambiguous terms)
       2) nested-name deduplication
-      3) toxicity / control filtering
+      3) context filtering (control/placebo excluded; negative plants kept but flagged)
+
+    Returns ``(plants, negative_plants)`` where both are lists of canonical names.
+    ``plants`` includes all non-control plants (positive and negative).
+    ``negative_plants`` is the subset flagged as adverse/harmful by keyword context.
     Instrumented with debug prints.
     """
 
@@ -341,16 +347,16 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> List[str]:
 
     out = filtered_nested
 
-    # 3) Toxicity + control filter
+    # 3) Context filter: exclude control/placebo, flag negative plants
+    negative: List[str] = []
     if out:
-        print("\n---- STEP 3: TOXICITY + CONTROL FILTER ----")
+        print("\n---- STEP 3: CONTEXT FILTER (control excluded / negative flagged) ----")
         print("before _filter_by_context:", out)
-        filtered_context = _filter_by_context(text, out, plant_db)
-        print("after  _filter_by_context:", filtered_context)
-        out = filtered_context
+        out, negative = _filter_by_context(text, out, plant_db)
+        print("after  _filter_by_context — kept:", out, "/ negative:", negative)
     else:
         print("\n---- STEP 3: (skipped) no plants to filter ----")
 
     print("\n==================== END DEBUG find_plants_in_text ====================\n")
 
-    return out
+    return out, negative

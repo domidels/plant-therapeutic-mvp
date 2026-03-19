@@ -34,9 +34,15 @@ def _client() -> httpx.AsyncClient:
 
 
 def build_query(condition: str, from_year: str, to_year: str) -> str:
-    cond = condition.strip()
+    # condition may contain synonyms joined by " OR "
+    # e.g. "urticaria OR hives OR allergic urticaria"
+    raw_terms = [t.strip() for t in condition.split(" OR ") if t.strip()]
+    condition_filter = " OR ".join(
+        f'"{t}"[Title] OR "{t}"[MeSH Major Topic:noexp]' for t in raw_terms
+    )
     terms = [
-        f'("{cond}"[Title/Abstract] OR "{cond}"[MeSH Terms])',
+        # Require condition (or a synonym) in the title or as primary MeSH topic.
+        f'({condition_filter})',
         '(herb OR herbal OR plant OR botanical OR phytotherapy OR extract OR supplement)',
         '(randomized OR randomised OR trial OR meta-analysis OR systematic)',
     ]

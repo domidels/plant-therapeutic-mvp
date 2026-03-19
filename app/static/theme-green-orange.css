@@ -293,6 +293,33 @@ button.ai-btn:disabled{
   cursor: not-allowed;
 }
 
+/* Negative-context summary card */
+.card.negative-card,
+.card.negative-card:hover {
+  background: #7b1a1a !important;
+  border-color: #5a1010 !important;
+  border-left: 4px solid #4a0d0d;
+  color: #ffffff;
+}
+.card.negative-card h3,
+.card.negative-card .muted,
+.card.negative-card pre,
+.card.negative-card a,
+.card.negative-card .pmids a {
+  color: #ffffff;
+}
+.card.negative-card .pmids a:hover {
+  color: #ffffff;
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.35);
+}
+/* Inner card (ai-box) inside a negative card — solid dark background for readability */
+.card.negative-card .card {
+  background: #5a1212 !important;
+  border-color: rgba(255,255,255,0.15) !important;
+  backdrop-filter: none;
+}
+
 /* Tooltip générique */
 [data-tooltip]{
   position: relative;
@@ -325,15 +352,16 @@ button.ai-btn:disabled{
 
 /* ===== Search banner ===== */
 .search-banner{
-  background: rgba(255,255,255,0.74);
-  border: 1px solid var(--border);
+  background: linear-gradient(135deg, #e8f5ee 0%, #d4eee0 100%);
+  border: 1.5px solid var(--green-2);
+  border-left: 4px solid var(--green-1);
   border-radius: .75rem;
-  padding: .7rem .9rem;
+  padding: .85rem 1.1rem;
   margin: .75rem 0 .55rem;
-  font-size: 1.02rem;
-  color: var(--text);
-  box-shadow: 0 1px 3px rgba(0,0,0,.04);
-  backdrop-filter: blur(8px);
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: #2e5a49;
+  box-shadow: 0 2px 8px rgba(111,159,133,.15);
 }
 
 /* ===== Cards (glass) ===== */
@@ -532,3 +560,19 @@ footer{
 /* Bonus: réduire le spacing interne du HTML */
 .summary-rich p{ margin: 0.45em 0 0.85em; }
 .summary-rich li{ margin: 0.25em 0; }
+/* Loading spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(111,159,133,.3);
+  border-top-color: var(--green-1);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  vertical-align: middle;
+  margin-left: 8px;
+  flex-shrink: 0;
+}

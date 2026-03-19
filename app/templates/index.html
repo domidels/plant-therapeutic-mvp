@@ -44,7 +44,7 @@
     <div id="appContent">
 
       <h1>Medicinal Plants in Research (Beta Version)
-        <span class="subtitle">Check each abstract for clinical relevance</span>
+        <span class="subtitle">View plant focused summary for clinical impact</span>
       </h1>
 
       <p class="muted">
@@ -65,8 +65,8 @@
       <div id="out"></div>
 
       <footer>
-        Sources: PubMed E-utilities. This MVP highlights plants/supplements mentioned in study titles/abstracts
-        and ranks simple evidence signals (meta-analyses, Randomized Control Trials, recency).
+        Sources: PubMed E-utilities. Searches condition title and primary MeSH topics, expanded with clinical synonyms.
+        Detects plants and supplements in abstracts, flags negative or irrelevant findings, and ranks results by evidence strength (meta-analyses, Randomized Clinical Trials, recency).
       </footer>
 
     </div>
@@ -282,7 +282,7 @@
         }
 
         box.innerHTML = `
-          <div class="muted"><strong>Plant-focused summary</strong> — info only.</div>
+          <div class="muted ai-summary-header"><strong>Plant-focused summary</strong> — info only.</div>
           <pre id="ai-${esc(pmid)}" style="white-space:pre-wrap;margin:0;">Loading…</pre>
         `;
 
@@ -315,6 +315,26 @@
             if (pre) pre.textContent += chunk;
           }
 
+          // Parse verdict marker emitted at end of stream
+          if (pre) {
+            const verdictMatch = pre.textContent.match(/\n__VERDICT:(NEGATIVE|POSITIVE)__/);
+            if (verdictMatch) {
+              pre.textContent = pre.textContent.replace(/\n__VERDICT:[A-Z]+__/, '').trimEnd();
+              if (verdictMatch[1] === 'NEGATIVE') {
+                const plantCard = btnEl.closest('.card');
+                if (plantCard) plantCard.classList.add('negative-card');
+                // Add 🛑 to the plant card <h3> title (once only)
+                const h3 = plantCard?.querySelector('h3');
+                if (h3 && !h3.querySelector('.verdict-negative')) {
+                  const badge = document.createElement('span');
+                  badge.className = 'verdict-negative';
+                  badge.textContent = ' 🛑 Negative or irrelevant impact';
+                  h3.appendChild(badge);
+                }
+              }
+            }
+          }
+
           await refreshAuthState();
         }catch(e){
           console.error(e);
@@ -344,11 +364,13 @@
           </div>
         `).join("");
 
+        const negativeClass = x.has_negative ? ' negative-card' : '';
+        const negativeBadge = x.has_negative ? ' <span class="verdict-negative"> 🛑 Negative or irrelevant impact</span>' : '';
         return `
-          <div class="card">
+          <div class="card${negativeClass}">
             <h3 style="margin:0">
-              ${esc(String(x.plant))}
-              <span class="badge" data-tooltip="Evidence score (top 5 studies):&#10;• Meta-analysis / systematic review: +5&#10;• Randomized trial (RCT): +4&#10;• Clinical trial: +2&#10;• Cohort / case-control: +1&#10;• Recency bonus: (year − 2015) × 0.2&#10;Higher = stronger scientific evidence" style="cursor:help;">score ${esc(String(x.score))}</span>
+              ${esc(String(x.plant))}${negativeBadge}
+              <span class="badge" data-tooltip="Evidence score (top 5 studies):&#10;• Meta-analysis / systematic review: +5&#10;• Randomized trial (RCT): +4&#10;• Clinical trial: +2&#10;• Cohort / case-control: +1&#10;• Recency bonus: (year − 2015) × 0.2&#10;Higher = stronger scientific evidence" style="cursor:help;">publication relevance score ${esc(String(x.score))}</span>
             </h3>
             <p>${esc(String(x.summary || ""))}</p>
             ${list}
@@ -366,7 +388,7 @@
         for (const y of years) {
           html += `
             <section class="year-block" id="y${y}">
-              <h2>${y}</h2>
+              <h2>${y}<span class="spinner" id="spin-${y}"></span></h2>
               <p class="muted">Loading…</p>
             </section>
           `;
@@ -405,10 +427,11 @@
             `;
 
             _state.loadedYears.add(year);
-            if (progressEl) progressEl.textContent = `Rendered year: ${year}`;
+            if (progressEl) progressEl.innerHTML = `Rendered year: ${year} <span class="spinner"></span>`;
           } catch (e) {
             console.error("Year", year, e);
             sec.innerHTML = `<h2>${year}</h2><p class="muted">Error while loading.</p>`;
+            _state.loadedYears.add(year);
           }
         };
 
@@ -423,6 +446,9 @@
 
         await Promise.allSettled([...Array(CONCURRENCY)].map(() => worker()));
         if (progressEl) progressEl.textContent = "";
+        // Remove global spinner when all years are done
+        const gs = document.getElementById("globalSpinner");
+        if (gs) gs.remove();
       }
 
       async function run() {
@@ -468,7 +494,7 @@
         _state = { condition: null, llmQuery: null, loadedYears: new Set() };
 
         out.innerHTML = `
-          <div id="searchInfo" class="search-banner muted">Thinking about your condition…</div>
+          <div id="searchInfo" class="search-banner muted">Thinking about your condition…<span class="spinner" id="globalSpinner"></span></div>
 
           <div id="diseaseSummary" class="card" style="margin-top:.5rem; display:none;" data-expanded="false">
             <div class="muted" style="margin-bottom:.25rem;"><strong>About this condition</strong></div>
@@ -498,6 +524,7 @@
         let correctedCondition = rawCond;
         let llmQuery = rawCond;
         let medlineHtml = "";
+        let synonymsList = [];
 
         try {
           const v = Date.now();
@@ -508,19 +535,26 @@
           const js = await r.json();
           correctedCondition = (js.corrected || rawCond).trim();
           llmQuery = (js.search_query || correctedCondition || rawCond).trim();
+          synonymsList = js.synonyms || [];
           medlineHtml = (js.medline_html || "").trim();
         } catch (e) {
           console.error("[UI] condition_query error:", e);
           correctedCondition = rawCond;
           llmQuery = rawCond;
           medlineHtml = "";
+          synonymsList = [];
         }
 
         // Save state for incremental reuse
         _state.condition = rawCond.toLowerCase();
         _state.llmQuery = llmQuery;
 
-        if (searchInfoEl) searchInfoEl.textContent = `Searching for: ${llmQuery || correctedCondition}`;
+        if (searchInfoEl) {
+          const alsoText = synonymsList.length
+            ? `<span style="font-weight:400;color:#4a7a63"> — also: ${synonymsList.join(", ")}</span>`
+            : "";
+          searchInfoEl.innerHTML = `<strong>Searching for:</strong> ${esc(correctedCondition)}${alsoText}`;
+        }
 
         const pubmedPromise = runApiByYear(correctedCondition, llmQuery, allYears, false);
 
