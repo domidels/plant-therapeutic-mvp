@@ -15,6 +15,7 @@ Rate limiting strategy
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -173,12 +174,14 @@ async def verify_human(req: VerifyReq, request: Request):
 # ---------------------------------------------------------------------
 
 # Quotas per IP per UTC day
-DAILY_HF_TOKEN_LIMIT = int(os.getenv("DAILY_HF_TOKEN_LIMIT", "4000"))
+# Each LLM summary call consumes ~2000 tokens; each condition query ~130 tokens.
+# 30 000 tokens ≈ 15 summaries + ~10 condition queries per user per day.
+DAILY_HF_TOKEN_LIMIT = int(os.getenv("DAILY_HF_TOKEN_LIMIT", "30000"))
 DAILY_TURSO_OP_LIMIT = int(os.getenv("DAILY_TURSO_OP_LIMIT", "5000"))
 DAILY_EXPLORE_LIMIT = int(os.getenv("DAILY_EXPLORE_LIMIT", "25"))
 
 # Global quotas (all IPs combined) — hard ceiling to cap total daily cost
-DAILY_GLOBAL_HF_TOKEN_LIMIT = int(os.getenv("DAILY_GLOBAL_HF_TOKEN_LIMIT", "50000"))
+DAILY_GLOBAL_HF_TOKEN_LIMIT = int(os.getenv("DAILY_GLOBAL_HF_TOKEN_LIMIT", "200000"))
 DAILY_GLOBAL_EXPLORE_LIMIT = int(os.getenv("DAILY_GLOBAL_EXPLORE_LIMIT", "150"))
 _GLOBAL_USER_ID = "_global"
 
@@ -279,6 +282,45 @@ _HF_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10
 _LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
 _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
+# Alert email — sent once per calendar month when HF quota is exhausted (HTTP 402)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+EMAIL_FROM = os.getenv("EMAIL_FROM", "Plant-Med <no-reply@plant-med.org>").strip()
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "").strip()
+_hf_quota_alerted_month: Optional[str] = None  # "YYYY-MM" of last alert sent
+
+
+async def _send_hf_quota_alert() -> None:
+    """Send a one-time email alert when the HuggingFace monthly credit is exhausted."""
+    global _hf_quota_alerted_month
+    current_month = datetime.utcnow().strftime("%Y-%m")
+    if _hf_quota_alerted_month == current_month:
+        return  # already sent this month
+    if not RESEND_API_KEY or not ALERT_EMAIL:
+        print("[alert] RESEND_API_KEY or ALERT_EMAIL not configured — skipping email alert")
+        return
+    _hf_quota_alerted_month = current_month
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "from": EMAIL_FROM,
+                    "to": [ALERT_EMAIL],
+                    "subject": f"[Plant-Med] HuggingFace quota exhausted — {current_month}",
+                    "text": (
+                        f"The HuggingFace free-tier monthly credit has been exhausted ({current_month}).\n\n"
+                        f"Model in use: {HF_MODEL}\n"
+                        "LLM summaries are no longer available until the credit resets next month "
+                        "or until you upgrade your HuggingFace plan.\n\n"
+                        "— Plant-Med alert"
+                    ),
+                },
+            )
+        print(f"[alert] HF quota alert sent to {ALERT_EMAIL}")
+    except Exception as e:
+        print(f"[alert] Failed to send HF quota alert: {e}")
+
 
 def _clean_text(s: str) -> str:
     """Strip non-printable characters from LLM output, keeping newlines and tabs."""
@@ -305,6 +347,8 @@ async def _llm_chat(
 
     async with httpx.AsyncClient(timeout=_HF_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
         r = await client.post(f"{HF_BASE_URL}/chat/completions", headers=headers, json=payload)
+        if r.status_code == 402:
+            asyncio.create_task(_send_hf_quota_alert())
         r.raise_for_status()
         js = r.json()
 
@@ -341,6 +385,8 @@ async def _llm_chat_stream(
             headers=headers,
             json=payload,
         ) as r:
+            if r.status_code == 402:
+                asyncio.create_task(_send_hf_quota_alert())
             if r.status_code >= 400:
                 raw = await r.aread()
                 print("[HF 400 BODY]", raw.decode("utf-8", errors="replace"))
