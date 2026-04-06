@@ -162,7 +162,7 @@ h3{
   display:flex;
   flex-direction: column;
   gap: 10px;
-  margin: 16px 0 12px;
+  margin: 32px 0 16px;
 }
 
 .row input#cond{
@@ -179,6 +179,7 @@ h3{
   display:flex;
   align-items:center;
   justify-content:flex-start;
+  align-self: flex-start;
   gap: 10px;
 }
 
