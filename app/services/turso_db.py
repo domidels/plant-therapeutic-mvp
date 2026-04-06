@@ -126,9 +126,15 @@ async def init_db() -> None:
             hf_tokens INTEGER NOT NULL DEFAULT 0,
             turso_ops INTEGER NOT NULL DEFAULT 0,
             explore_calls INTEGER NOT NULL DEFAULT 0,
+            invalid_queries INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, day)
         );
     """)
+    # Add column to existing databases (ignored if already present)
+    try:
+        await db_execute("ALTER TABLE usage_daily ADD COLUMN invalid_queries INTEGER NOT NULL DEFAULT 0;")
+    except Exception:
+        pass
     await db_execute("""CREATE INDEX IF NOT EXISTS idx_usage_daily_user ON usage_daily(user_id);""")
 
     # --- user_sessions (one row per hashed IP) ---
@@ -259,11 +265,34 @@ async def usage_get(user_id: str) -> tuple[int, int, int]:
     )
     if not row:
         await db_execute(
-            "INSERT INTO usage_daily(user_id, day, hf_tokens, turso_ops, explore_calls) VALUES(?, ?, 0, 0, 0);",
+            "INSERT INTO usage_daily(user_id, day, hf_tokens, turso_ops, explore_calls, invalid_queries) VALUES(?, ?, 0, 0, 0, 0);",
             (user_id, day),
         )
         return (0, 0, 0)
     return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+
+
+async def increment_invalid_query(user_id: str) -> int:
+    """
+    Increment the invalid-query counter for ``user_id`` today and return the new total.
+
+    Used to detect and block IPs that repeatedly submit non-medical inputs.
+    """
+    day = _utc_day_str()
+    await db_execute(
+        """
+        INSERT INTO usage_daily(user_id, day, hf_tokens, turso_ops, explore_calls, invalid_queries)
+        VALUES(?, ?, 0, 0, 0, 1)
+        ON CONFLICT(user_id, day) DO UPDATE SET
+            invalid_queries = invalid_queries + 1;
+        """,
+        (user_id, day),
+    )
+    row = await db_fetchone(
+        "SELECT invalid_queries FROM usage_daily WHERE user_id=? AND day=? LIMIT 1;",
+        (user_id, day),
+    )
+    return int(row[0] or 0) if row else 1
 
 
 async def usage_add(user_id: str, add_hf_tokens: int = 0, add_turso_ops: int = 0, add_explore: int = 0) -> None:

@@ -51,6 +51,7 @@ from app.services.turso_db import (
     # tracking
     upsert_user_session,
     insert_user_search,
+    increment_invalid_query,
 )
 
 router = APIRouter()
@@ -443,41 +444,45 @@ SET condition = excluded.condition,
 """
 
 
-async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str]]:
+async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str], bool]:
     """
-    Use the LLM to correct spelling and return synonyms for a condition name.
+    Use the LLM to correct spelling, return synonyms, and validate that the
+    input is a recognisable medical condition.
 
-    Returns ``(corrected, synonyms)`` where ``synonyms`` is a list of alternative
-    clinical terms and MeSH synonyms to broaden the PubMed search.
-    Falls back to ``(original, [])`` on failure.
+    Returns ``(corrected, synonyms, is_condition)`` where ``is_condition`` is
+    False when the input cannot be interpreted as a disease, symptom, or syndrome.
+    Falls back to ``(original, [], True)`` on LLM failure (fail open).
     """
     cond = (cond or "").strip()
     if not cond:
-        return "", []
+        return "", [], False
 
     fallback_system = (
         "You are a medical terminology assistant.\n"
-        "Your job is to interpret a user-entered condition name and return:\n"
-        "1. The most recognised standard medical term in English (fix spelling, expand abbreviations).\n"
-        "2. Up to 3 EXACT synonyms — different names for the SAME condition used in clinical literature.\n"
-        "   Example: 'urticaria' → synonyms: hives, urticaria chronica, allergic urticaria\n"
-        "   Example: 'HTN' → 'hypertension', synonyms: high blood pressure, arterial hypertension\n"
-        "   Example: 'colesterol' → 'hypercholesterolemia', synonyms: high cholesterol, hyperlipidemia\n"
+        "Your job is to interpret a user-entered condition name and return THREE lines.\n"
+        "\n"
+        "Line 1 — IS_CONDITION: YES or NO\n"
+        "  Write YES if the input is a recognisable disease, symptom, syndrome, or medical condition.\n"
+        "  Write NO if the input is a random word, a plant name, a food, a number, a question, or anything else.\n"
+        "\n"
+        "Line 2 — CORRECTED: <standard medical term in English>\n"
+        "  Fix spelling and expand abbreviations. If IS_CONDITION is NO, write CORRECTED: N/A\n"
+        "\n"
+        "Line 3 — SYNONYMS: <synonym1>, <synonym2>, <synonym3>\n"
+        "  Up to 3 EXACT synonyms used in clinical literature for the SAME condition.\n"
+        "  Example: 'urticaria' → hives, urticaria chronica, nettle rash\n"
+        "  Example: 'HTN' → high blood pressure, arterial hypertension\n"
+        "  Do NOT add broader categories or parent diseases.\n"
+        "  If no useful synonyms exist, or if IS_CONDITION is NO, write SYNONYMS: (empty)\n"
         "\n"
         "STRICT RULES:\n"
-        "- Synonyms must refer to the EXACT SAME condition — NOT broader categories, NOT parent diseases.\n"
-        "  BAD example for 'urticaria': do NOT return 'allergic skin disease' or 'hypersensitivity reaction' (these are broader).\n"
-        "  GOOD example for 'urticaria': 'hives', 'urticaria chronica', 'nettle rash'.\n"
         "- Do NOT add any other text or explanation.\n"
-        "- If no useful synonyms exist, write SYNONYMS: (empty)\n"
-        "\n"
-        "You MUST answer with EXACTLY TWO LINES in this format:\n"
-        "CORRECTED: <standard medical term>\n"
-        "SYNONYMS: <synonym1>, <synonym2>, <synonym3>\n"
+        "- Answer with EXACTLY THREE LINES.\n"
     )
 
     fallback_user = (
-        f"User condition: {cond}\n\n"
+        f"User input: {cond}\n\n"
+        "IS_CONDITION: YES or NO\n"
         "CORRECTED: <standard medical term>\n"
         "SYNONYMS: <synonym1>, <synonym2>, ..."
     )
@@ -489,21 +494,25 @@ async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str]]:
 
     corrected = cond
     synonyms: List[str] = []
-    raw = await _llm_chat(messages_txt, max_tokens=128, temperature=0.0)
+    is_condition = True  # fail open
+    raw = await _llm_chat(messages_txt, max_tokens=150, temperature=0.0)
     raw = _clean_text(raw).strip()
 
     for line in raw.splitlines():
         ls = line.strip()
-        if ls.upper().startswith("CORRECTED:"):
+        if ls.upper().startswith("IS_CONDITION:"):
+            value = ls[len("IS_CONDITION:"):].strip().upper()
+            is_condition = value != "NO"
+        elif ls.upper().startswith("CORRECTED:"):
             value = ls[len("CORRECTED:"):].strip()
-            if value:
+            if value and value.upper() not in ("N/A", "NA"):
                 corrected = value
         elif ls.upper().startswith("SYNONYMS:"):
             value = ls[len("SYNONYMS:"):].strip()
             if value and value.lower() != "(empty)":
                 synonyms = [s.strip() for s in value.split(",") if s.strip()]
 
-    return corrected, synonyms
+    return corrected, synonyms, is_condition
 
 
 async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, bool]:
@@ -533,19 +542,20 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
         row = None
 
     synonyms: List[str] = []
+    is_condition = True
 
     if row and row[0]:
         # Condition already known — use cached correction, still fetch synonyms via LLM
         corrected_norm = normalize_condition(row[0])
         try:
-            _, synonyms = await _expand_condition_with_llm(corrected_norm)
+            _, synonyms, is_condition = await _expand_condition_with_llm(corrected_norm)
             used_llm = True
         except Exception:
             synonyms = []
     else:
         # 2) LLM fallback for both correction and synonyms
         try:
-            corrected, synonyms = await _expand_condition_with_llm(raw_norm)
+            corrected, synonyms, is_condition = await _expand_condition_with_llm(raw_norm)
             corrected_norm = normalize_condition(corrected) or raw_norm
             used_llm = True
         except Exception as e:
@@ -553,6 +563,10 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
             traceback.print_exc()
             corrected_norm = raw_norm
             used_llm = False
+
+    # Skip DB writes if input is not a medical condition
+    if not is_condition:
+        return corrected_norm, corrected_norm, used_llm, synonyms, is_condition
 
     # 3) increment corrected condition counter
     try:
@@ -566,7 +580,7 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     except Exception as e:
         print(f"[cond-db] upsert misspelling failed: {type(e).__name__}: {e}")
 
-    return corrected_norm, corrected_norm, used_llm, synonyms
+    return corrected_norm, corrected_norm, used_llm, synonyms, is_condition
 
 
 # ---------------------------------------------------------------------
@@ -574,7 +588,7 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
 # ---------------------------------------------------------------------
 @router.get("/condition_query")
 async def condition_query(
-    condition: str = Query(..., min_length=2),
+    condition: str = Query(..., min_length=2, max_length=100),
     request: Request = None,
     _: None = Depends(require_human),
 ):
@@ -590,15 +604,37 @@ async def condition_query(
     search_query = condition
     used_llm = False
     synonyms: List[str] = []
+    is_condition = True
 
     try:
-        corrected, search_query, used_llm, synonyms = await resolve_condition_db_first(condition)
+        corrected, search_query, used_llm, synonyms, is_condition = await resolve_condition_db_first(condition)
         if not corrected:
             corrected = condition
             search_query = condition
     except Exception as e:
         print(f"[cond_api] resolve_condition_db_first error: {type(e).__name__}: {e}")
         traceback.print_exc()
+
+    if not is_condition:
+        try:
+            invalid_count = await increment_invalid_query(user_id)
+        except Exception:
+            invalid_count = 0
+        if invalid_count >= 10:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many invalid requests today. Access is blocked until midnight UTC.",
+            )
+        return JSONResponse(
+            content={
+                "error": "no_condition",
+                "message": (
+                    "No medical condition could be deduced from your input. "
+                    "Please enter a disease, symptom, or medical syndrome "
+                    "(e.g. eczema, type 2 diabetes, anxiety)."
+                ),
+            }
+        )
 
     # Record the search (fire-and-forget — never block the response on failure)
     try:

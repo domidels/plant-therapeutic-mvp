@@ -53,7 +53,7 @@
       </p>
 
       <div class="row">
-        <input id="cond" placeholder="e.g., type 2 diabetes, anxiety, eczema (enter one disease or symptom at a time)" />
+        <input id="cond" maxlength="100" placeholder="e.g., type 2 diabetes, anxiety, eczema (enter one disease or symptom at a time)" />
 
         <div class="row-actions">
           <span class="start-label">Start searching from</span>
@@ -457,6 +457,10 @@
         const condEl = document.getElementById("cond");
         const rawCond = (condEl ? condEl.value : "").trim();
         if (!rawCond) return;
+        if (rawCond.length > 100) {
+          alert("Please enter a shorter condition name (maximum 100 characters).");
+          return;
+        }
 
         const out = document.getElementById("out");
         if (!out) return;
@@ -533,6 +537,17 @@
           if (!r.ok) throw new Error(`HTTP ${r.status}`);
 
           const js = await r.json();
+
+          // Input not recognised as a medical condition — abort search
+          if (js.error === "no_condition") {
+            const progressEl = document.getElementById("progress");
+            if (progressEl) {
+              progressEl.innerHTML = `<span style="color:#b00020;font-weight:600">⚠ ${esc(js.message)}</span>`;
+            }
+            if (searchInfoEl) searchInfoEl.innerHTML = "";
+            return;
+          }
+
           correctedCondition = (js.corrected || rawCond).trim();
           llmQuery = (js.search_query || correctedCondition || rawCond).trim();
           synonymsList = js.synonyms || [];
