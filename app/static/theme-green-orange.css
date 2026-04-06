@@ -54,7 +54,7 @@ body{
   background: var(--bg);
 
   /* lecture confortable comme une app */
-  max-width: 920px;
+  max-width: 1400px;
   margin: 28px auto;
   padding: 0 16px 48px;
 
