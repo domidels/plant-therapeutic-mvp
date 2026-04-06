@@ -18,18 +18,11 @@ CONTEXT_WORDS = {
 NEGATIVE_KEYWORDS = {
     "toxicity", "toxic", "poisoning", "poison", "overdose",
     "induced liver injury", "liver injury", "liver damage", "hepatotoxicity", "hepatotoxic",
-    "harmful", "damage", "injury", "drug-induced",
-    "herb-induced", "herbal-induced", "disorder", "death", "fatal",
-    "implicating",
+    "drug-induced", "herb-induced", "herbal-induced",
     "adverse drug reaction", "adverse reaction",
     "adverse effect", "adverse effects",
-    "adverse event", "adverse events",
-    "side effect", "side effects",
     "risk of bleeding",
-    "drug interaction",
-    "safety concern",
     "fatal outcome",
-    "suspected",
 }
 
 # Typical control/placebo group contexts
