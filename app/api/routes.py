@@ -819,12 +819,11 @@ async def explore_stream(
     _: None = Depends(require_human),
 ):
     user_id = await get_ip_user_id(request)
-    # baseline DB tick
-    await enforce_quota(user_id, add_turso_ops=1)
 
     pub_id = f"pub_{pmid}"
 
-    # 1) Turso cache
+    # 1) Turso cache — checked BEFORE any quota enforcement so cached summaries
+    #    are always served even when the user's daily quota is exhausted.
     try:
         cached = await get_resume_by_pub_id(pub_id)
     except Exception as e:
@@ -846,8 +845,8 @@ async def explore_stream(
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
-    # cache miss => will call HF => enforce explore + token budget now
-    # (conservative estimate)
+    # Cache miss — LLM call required: enforce quotas now
+    await enforce_quota(user_id, add_turso_ops=1)
     await enforce_global_quota(add_explore=1)
     await enforce_quota(user_id, add_explore=1, add_turso_ops=1)
 
