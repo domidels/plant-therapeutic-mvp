@@ -14,15 +14,19 @@ CONTEXT_WORDS = {
     "cream", "topical", "plant", "compound"
 }
 
-# Keywords signalling genuine toxicity / adverse outcomes
+# Keywords signalling unambiguous toxicity — almost never negated in clinical abstracts.
+# Ambiguous cases (adverse effects, drug interactions, etc.) are left to the LLM VERDICT.
 NEGATIVE_KEYWORDS = {
     "toxicity", "toxic", "poisoning", "poison", "overdose",
-    "induced liver injury", "liver injury", "liver damage", "hepatotoxicity", "hepatotoxic",
-    "drug-induced", "herb-induced", "herbal-induced",
-    "adverse drug reaction", "adverse reaction",
-    "adverse effect", "adverse effects",
-    "risk of bleeding",
+    "hepatotoxicity", "hepatotoxic",
+    "induced liver injury", "liver injury", "liver damage",
     "fatal outcome",
+}
+
+# Negation words: if any appear within 6 tokens before a negative keyword, do not flag.
+_NEGATION_WORDS = {
+    "no", "not", "without", "absence", "never", "non",
+    "failed", "unlikely", "unrelated", "excluded", "ruled out",
 }
 
 # Typical control/placebo group contexts
@@ -208,8 +212,16 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
         if not plants_here:
             continue
 
-        # Toxicity: keyword presence is sufficient
-        has_neg = any(k in c_norm for k in NEGATIVE_KEYWORDS)
+        # Toxicity: keyword present AND not preceded by a negation within 6 tokens
+        has_neg = False
+        for kw in NEGATIVE_KEYWORDS:
+            idx = c_norm.find(kw)
+            if idx == -1:
+                continue
+            preceding_tokens = c_norm[:idx].split()[-6:]
+            if not any(neg in preceding_tokens for neg in _NEGATION_WORDS):
+                has_neg = True
+                break
 
         # Control group: apply finer heuristics
         if _is_group_enumeration_clause(c_norm):
