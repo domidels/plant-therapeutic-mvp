@@ -25,6 +25,13 @@
 
   <!-- Gate Turnstile -->
   <div id="gate" class="card">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 21V10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+        <path d="M12 12c-4 0-6.5-2.5-6.5-6.5C9.5 5.5 12 8 12 12z" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M12 12c4 0 6.5-2.5 6.5-6.5C14.5 5.5 12 8 12 12z" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
     <p class="muted"><strong>Quick check</strong> — confirm you are human.</p>
 
     <div
@@ -43,8 +50,22 @@
 
     <div id="appContent">
 
-      <h1>Medicinal Plants in Research (Beta Version)
-        <span class="subtitle">View plant focused summary for clinical impact</span>
+      <header class="site-header">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 21V10" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+            <path d="M12 12c-4 0-6.5-2.5-6.5-6.5C9.5 5.5 12 8 12 12z" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 12c4 0 6.5-2.5 6.5-6.5C14.5 5.5 12 8 12 12z" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <span class="brand-name">Natural Therapeutics</span>
+          <span class="brand-tag">Research-backed plant summaries</span>
+        </div>
+      </header>
+
+      <h1>Medicinal Plants in Research
+        <span class="subtitle">Beta — plant-focused summaries for clinical impact</span>
       </h1>
 
       <p class="muted intro-box">
@@ -54,14 +75,21 @@
       </p>
 
       <div class="row">
-        <input id="cond" maxlength="100" placeholder="e.g., sleep disorder, migraine, eczema (enter one disease or symptom at a time)" />
+        <div class="field-group field-group--full">
+          <span class="row-eyebrow">Enter a condition or symptom</span>
+          <input id="cond" maxlength="100" placeholder="e.g., sleep disorder, migraine, eczema (enter one disease or symptom at a time)" />
+        </div>
 
-        <div class="row-actions">
-          <span class="start-label">Start searching from</span>
-          <select id="fromYear"></select>
-          <button id="btn">Search</button>
+        <div class="field-group">
+          <span class="row-eyebrow">Select a start year</span>
+          <div class="row-actions">
+            <select id="fromYear"></select>
+            <button id="btn">Search</button>
+          </div>
         </div>
       </div>
+
+      <p class="muted search-hint">Searching PubMed can take a little while, especially for a wide year range — results stream in year by year, so the oldest ones may take a bit longer to appear.</p>
 
       <div id="out"></div>
 
