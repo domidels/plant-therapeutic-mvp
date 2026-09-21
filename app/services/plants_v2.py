@@ -36,7 +36,7 @@ _NEGATION_WORDS = {
 ALLERGY_KEYWORDS = {
     "allergic to", "allergy to", "contact allergy", "contact dermatitis",
     "sensitization to", "sensitisation to", "cross-reactivity", "occupational allergy",
-    "anaphylaxis", "anaphylactic reaction", "hypersensitivity to",
+    "anaphylaxis", "anaphylactic reaction", "hypersensitivity to", "allergic contact to", 
 }
 
 # Typical control/placebo group contexts
