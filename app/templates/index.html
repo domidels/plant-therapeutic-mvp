@@ -359,7 +359,7 @@
 
             // Per-plant status (multi-plant-aware path): tag negative/unproven
             // plants in red within the title instead of hiding anything.
-            const plantStatusRe = /\n__PLANT_STATUS:([^=\n]+)=(POSITIVE|NEGATIVE|NONE)__/g;
+            const plantStatusRe = /\n__PLANT_STATUS:([^=\n]+)=(POSITIVE|NEGATIVE|NONE|IRRELEVANT)__/g;
             const plantStatuses = [];
             let sm;
             while ((sm = plantStatusRe.exec(text)) !== null) {
@@ -413,6 +413,7 @@
           const flag = flags[n];
           if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative</span>`;
           if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">Not proven</span>`;
+          if (flag === 'IRRELEVANT') return `${esc(n)} <span class="plant-flag plant-flag-irrelevant">Irrelevant match</span>`;
           return esc(n);
         }).join(', ');
       }

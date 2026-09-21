@@ -840,12 +840,23 @@ async def recommendations(
     except Exception:
         plant_verdicts = {}
 
+    # Plants confirmed IRRELEVANT (the name doesn't actually refer to the plant in a
+    # given article — e.g. "Cinnamon" as part of the "Cinnamon/Nagoya" mouse strain
+    # name) are dropped from future results entirely — unlike a negative/no-effect
+    # finding, they carry no information worth showing.
+    IRRELEVANT_CODE = 3
+    filtered_results: List[Dict[str, Any]] = []
     for r in results:
         names = [p.strip() for p in r["plant"].split(",") if p.strip()]
+        relevant_names = [n for n in names if plant_verdicts.get(n.lower()) != IRRELEVANT_CODE]
+        if not relevant_names:
+            continue
+        r["plant"] = ", ".join(relevant_names)
+
         flags = {}
         known_positive = 0
         known_bad = 0
-        for n in names:
+        for n in relevant_names:
             v = plant_verdicts.get(n.lower())
             if v == 1:
                 flags[n] = "NEGATIVE"
@@ -856,9 +867,11 @@ async def recommendations(
             elif v == 0:
                 known_positive += 1
         r["plant_flags"] = flags
-        r["_all_flagged"] = bool(names) and len(flags) == len(names)
+        r["_all_flagged"] = bool(relevant_names) and len(flags) == len(relevant_names)
         r["_known_positive"] = known_positive
         r["_known_bad"] = known_bad
+        filtered_results.append(r)
+    results = filtered_results
 
     # Enrich results with cached verdict — single batch query.
     # Keys are scoped per (pmid, plant, condition): see _pub_cache_id.
@@ -936,7 +949,7 @@ async def explore_stream(
                     verdict_map = {}
                 for p in parts_pl:
                     code = verdict_map.get(p.lower())
-                    status = {1: "NEGATIVE", 2: "NONE"}.get(code, "POSITIVE")
+                    status = {1: "NEGATIVE", 2: "NONE", 3: "IRRELEVANT"}.get(code, "POSITIVE")
                     yield f"\n__PLANT_STATUS:{p}={status}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
@@ -1058,13 +1071,17 @@ async def explore_stream(
         verdict_lines = "\n".join(f"PLANT_VERDICT: {p}=<VERDICT>" for p in parts_pl)
         user_content += (
             "Then, on separate lines after the paragraph, output exactly one verdict line for EACH plant "
-            "listed below, in this exact format (replace <VERDICT> with one of POSITIVE, NEGATIVE or NONE — "
-            "do not add anything else on these lines):\n"
+            "listed below, in this exact format (replace <VERDICT> with one of POSITIVE, NEGATIVE, NONE or "
+            "IRRELEVANT — do not add anything else on these lines):\n"
             f"{verdict_lines}\n\n"
             f"- POSITIVE: the CONTEXT shows this plant has a helpful/therapeutic effect on {condition_for_prompt}.\n"
             f"- NEGATIVE: the CONTEXT shows this plant has an adverse, harmful or contraindicated effect on "
             f"{condition_for_prompt}, or {condition_for_prompt} appears only as a side effect of it.\n"
-            f"- NONE: the CONTEXT does not show a meaningful effect of this plant on {condition_for_prompt}."
+            f"- NONE: the CONTEXT does not show a meaningful effect of this plant on {condition_for_prompt}.\n"
+            "- IRRELEVANT: the plant's name does not actually refer to the plant in this CONTEXT at all — e.g. "
+            "it is part of an unrelated proper noun (an animal strain name such as \"Cinnamon/Nagoya mice\", a "
+            "place, a person's name, an unrelated compound). If you use IRRELEVANT for a plant, the paragraph "
+            "must explain what the name actually refers to instead of describing a treatment effect for it."
         )
     else:
         user_content += (
@@ -1122,7 +1139,7 @@ async def explore_stream(
         if parts_pl:
             # Multi/single-plant path: one PLANT_VERDICT line per named plant.
             for m in _re.finditer(
-                r"PLANT_VERDICT:\s*(.+?)\s*=\s*(POSITIVE|NEGATIVE|NONE)\b",
+                r"PLANT_VERDICT:\s*(.+?)\s*=\s*(POSITIVE|NEGATIVE|NONE|IRRELEVANT)\b",
                 full_resume,
                 flags=_re.IGNORECASE,
             ):
@@ -1134,8 +1151,8 @@ async def explore_stream(
             parsed_words = [plant_verdicts.get(p.lower()) for p in parts_pl]
             known_words = [w for w in parsed_words if w]
             # Negative overall only if every plant we could parse came back
-            # NEGATIVE/NONE — i.e. none of them show a positive effect.
-            verdict = "NEGATIVE" if known_words and all(w in ("NEGATIVE", "NONE") for w in known_words) else "POSITIVE"
+            # NEGATIVE/NONE/IRRELEVANT — i.e. none of them show a positive effect.
+            verdict = "NEGATIVE" if known_words and all(w in ("NEGATIVE", "NONE", "IRRELEVANT") for w in known_words) else "POSITIVE"
         else:
             # Legacy path (no plant context supplied): single VERDICT line.
             verdict = "POSITIVE"
@@ -1147,7 +1164,7 @@ async def explore_stream(
         verdict_int = 1 if verdict == "NEGATIVE" else 0
         yield f"\n__VERDICT:{verdict}__"
 
-        verdict_code = {"POSITIVE": 0, "NEGATIVE": 1, "NONE": 2}
+        verdict_code = {"POSITIVE": 0, "NEGATIVE": 1, "NONE": 2, "IRRELEVANT": 3}
 
         for p in parts_pl:
             word = plant_verdicts.get(p.lower())

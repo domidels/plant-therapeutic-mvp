@@ -415,6 +415,11 @@ button.ai-btn:disabled{
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
 }
+.plant-flag-irrelevant{
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
 
 /* Tooltip générique */
 [data-tooltip]{
