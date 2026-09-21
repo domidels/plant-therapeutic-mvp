@@ -1029,6 +1029,11 @@ async def explore_stream(
         "4. Do NOT copy article identifiers, DOIs, or numeric codes.\n"
         "5. Be factual and neutral — do not overstate preliminary or observational findings.\n"
         "6. This is information only, not medical advice.\n"
+        "7. Never assume a plant was used as a treatment just because its name appears somewhere in the "
+        "CONTEXT (e.g. inside an animal strain name, a product code, a place or person's name, an unrelated "
+        "compound). Only describe a treatment effect for a plant if the CONTEXT explicitly states that the "
+        "plant, its extract, or a preparation of it was administered, tested or applied. If it wasn't, say so "
+        "plainly instead of inferring or guessing that it might have been.\n"
     )
 
     _BASE_TMPL = (
@@ -1036,11 +1041,18 @@ async def explore_stream(
         "Health condition being researched: {condition}\n"
         "Plant/supplement being evaluated: {plant}\n\n"
         "CONTEXT:\n{context}\n\n"
+        "FIRST, before writing anything: for each plant listed above, check whether the CONTEXT explicitly "
+        "states that the plant itself (its extract, preparation, or the plant material) was administered, "
+        "tested, or applied as part of the study. If a plant's name only appears inside something unrelated "
+        "(an animal strain name, a product/study code, a place or person's name, an unrelated chemical), "
+        "treat it as IRRELEVANT — do not invent or assume a formula, extract or treatment containing it.\n\n"
         "Write ONE paragraph of 4–6 short sentences, in plain language for a general audience, that:\n"
         "- States what the study looked at and how (describe the study type in plain terms, e.g. "
         "\"a small trial\", \"a review that combined several studies\").\n"
         "- Explains specifically how {plant} affects {condition} in this study — what changed, and why, in "
-        "everyday terms (not just \"the condition\" — name {condition} directly).\n"
+        "everyday terms (not just \"the condition\" — name {condition} directly). Only if the check above "
+        "confirmed the plant was actually used — otherwise, briefly say what its name actually refers to "
+        "instead.\n"
         "{multi_plant_rule}"
         "- Gives the size of the effect in everyday terms if the CONTEXT provides numbers (e.g. dose, how many "
         "people improved).\n"
@@ -1080,8 +1092,11 @@ async def explore_stream(
             f"- NONE: the CONTEXT does not show a meaningful effect of this plant on {condition_for_prompt}.\n"
             "- IRRELEVANT: the plant's name does not actually refer to the plant in this CONTEXT at all — e.g. "
             "it is part of an unrelated proper noun (an animal strain name such as \"Cinnamon/Nagoya mice\", a "
-            "place, a person's name, an unrelated compound). If you use IRRELEVANT for a plant, the paragraph "
-            "must explain what the name actually refers to instead of describing a treatment effect for it."
+            "place, a person's name, an unrelated compound). Use IRRELEVANT whenever the CONTEXT does not "
+            "explicitly state the plant itself was administered/tested — never guess or assume a formula, "
+            "extract, or treatment contains it just because the name appears nearby. If you use IRRELEVANT for "
+            "a plant, the paragraph must explain what the name actually refers to instead of describing a "
+            "treatment effect for it."
         )
     else:
         user_content += (
