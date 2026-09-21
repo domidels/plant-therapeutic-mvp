@@ -29,6 +29,16 @@ _NEGATION_WORDS = {
     "failed", "unlikely", "unrelated", "excluded", "ruled out",
 }
 
+# Phrases indicating the plant itself is the allergen/cause of a reaction — not a
+# plant being studied to *treat* an allergic condition (e.g. "allergic rhinitis").
+# Kept as specific multi-word phrases on purpose: bare "allergy"/"allergic" would
+# also match "used to treat allergic rhinitis", which is a legitimate therapeutic hit.
+ALLERGY_KEYWORDS = {
+    "allergic to", "allergy to", "contact allergy", "contact dermatitis",
+    "sensitization to", "sensitisation to", "cross-reactivity", "occupational allergy",
+    "anaphylaxis", "anaphylactic reaction", "hypersensitivity to",
+}
+
 # Typical control/placebo group contexts
 # NOTE: "placebo" alone is intentionally excluded to avoid false positives on arm-enumeration sentences.
 CONTROL_KEYWORDS = {
@@ -192,7 +202,7 @@ def _describes_control_treatment(c_norm: str) -> bool:
 def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
     """Classify each detected plant clause by clause for toxicity and control signals."""
     clauses = _split_clauses(text)
-    ctx = {p: {"negative": False, "control": False} for p in plants}
+    ctx = {p: {"negative": False, "control": False, "allergy": False} for p in plants}
 
     alias_to_can = {}
     for p in plant_db:
@@ -223,6 +233,18 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
                 has_neg = True
                 break
 
+        # Plant-as-allergen: same negation check, so "no allergy to X was observed"
+        # doesn't wrongly exclude X.
+        has_allergy = False
+        for kw in ALLERGY_KEYWORDS:
+            idx = c_norm.find(kw)
+            if idx == -1:
+                continue
+            preceding_tokens = c_norm[:idx].split()[-6:]
+            if not any(neg in preceding_tokens for neg in _NEGATION_WORDS):
+                has_allergy = True
+                break
+
         # Control group: apply finer heuristics
         if _is_group_enumeration_clause(c_norm):
             # Arm enumeration (M. piperita, E. cardamomum, placebo) → not a control context
@@ -239,6 +261,8 @@ def _classify_context(text: str, plants: List[str], plant_db: List[Dict]):
                 ctx[can]["negative"] = True
             if has_ctrl:
                 ctx[can]["control"] = True
+            if has_allergy:
+                ctx[can]["allergy"] = True
 
     return ctx
 
@@ -246,19 +270,22 @@ def _filter_by_context(text: str, plants: List[str], plant_db: List[Dict]) -> tu
     """
     Final filtering rules:
        - control/placebo plants are excluded entirely
+       - plants mentioned only as the cause of an allergic reaction are excluded
+         entirely (an allergy case report is not therapeutic evidence)
        - negative plants are kept but returned separately
        - everything else is kept as positive/neutral
 
     Returns ``(kept_plants, negative_plants)`` where both are lists of canonical names.
-    ``kept_plants`` includes negative ones so all non-control plants appear in results.
+    ``kept_plants`` includes negative ones so all non-control, non-allergy plants
+    appear in results.
     """
     ctx = _classify_context(text, plants, plant_db)
     kept = []
     negative = []
 
     for p in plants:
-        if ctx[p]["control"]:
-            continue  # still exclude control/placebo
+        if ctx[p]["control"] or ctx[p]["allergy"]:
+            continue  # still exclude control/placebo and plant-as-allergen mentions
         kept.append(p)
         if ctx[p]["negative"]:
             negative.append(p)

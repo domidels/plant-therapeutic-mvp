@@ -430,21 +430,17 @@
       }
 
       function applyCardStatusColor(plantCard, currentNames, flags) {
+        // Live updates (right after an Explore click) only ever turn a card red —
+        // a single freshly-explored article isn't enough to declare it green/yellow
+        // with confidence. Green/yellow are shown only once the server recomputes
+        // them from the full persisted history, on the next search/page load.
         if (!plantCard) return;
         const knownBad = currentNames.filter(n => flags[n] === 'NEGATIVE' || flags[n] === 'NONE').length;
-        const knownPositive = currentNames.filter(n => flags[n] === 'POSITIVE').length;
         const allFlagged = currentNames.length > 0 && knownBad === currentNames.length;
 
-        plantCard.classList.remove('negative-card', 'mixed-card', 'positive-card');
-        const oldBadge = plantCard.querySelector('h3 .verdict-negative');
-        if (oldBadge) oldBadge.remove();
-
         if (allFlagged) {
+          plantCard.classList.remove('mixed-card', 'positive-card');
           markCardNegative(plantCard);
-        } else if (knownBad > 0 && knownPositive > 0) {
-          plantCard.classList.add('mixed-card');
-        } else if (knownPositive > 0) {
-          plantCard.classList.add('positive-card');
         }
       }
 
