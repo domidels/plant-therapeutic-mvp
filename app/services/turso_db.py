@@ -211,27 +211,29 @@ async def get_negative_pub_ids(pub_ids: list[str]) -> set[str]:
         return {row[0] for row in (rs.rows or [])}
 
 
-async def get_negative_plants_for_condition(condition: str) -> set[str]:
-    """Return the (normalized, lowercase) plant names previously confirmed to have
-    no meaningful or a negative effect on ``condition``.
+async def get_plant_verdicts_for_condition(condition: str) -> dict[str, int]:
+    """Return ``{plant_name: verdict}`` for every plant previously verified against
+    ``condition``, where ``verdict`` is ``0`` (positive), ``1`` (negative/adverse) or
+    ``2`` (no meaningful effect shown).
 
-    Used to drop those plants — or whole result cards, when none of their
-    plants remain — from later searches of the same condition.
+    Used to flag those plants — in red, with a "Negative"/"Not proven" tag — the
+    next time they surface in a search for the same condition.
     """
     condition_key = (condition or "").strip().lower()
     if not condition_key:
-        return set()
+        return {}
     _check_cfg()
     async with create_client(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as db:
         rs = await db.execute(
-            "SELECT plant FROM plant_condition_verdict WHERE condition = ? AND verdict = 1;",
+            "SELECT plant, verdict FROM plant_condition_verdict WHERE condition = ?;",
             (condition_key,),
         )
-        return {row[0] for row in (rs.rows or [])}
+        return {row[0]: row[1] for row in (rs.rows or [])}
 
 
 async def upsert_plant_verdict(condition: str, plant: str, verdict: int) -> None:
-    """Persist whether ``plant`` has a positive (0) or negative/no (1) effect on ``condition``.
+    """Persist whether ``plant`` has a positive (0), negative/adverse (1), or no
+    meaningful (2) effect on ``condition``.
 
     Last-verified-wins: a later explanation for the same (condition, plant) overwrites
     the previous verdict.

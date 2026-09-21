@@ -357,13 +357,13 @@
           if (pre) {
             let text = pre.textContent;
 
-            // Per-plant status (multi-plant-aware path): drop ineffective plants
-            // from the card title, or the whole card if none remain effective.
-            const plantStatusRe = /\n__PLANT_STATUS:([^=\n]+)=(EFFECTIVE|INEFFECTIVE)__/g;
+            // Per-plant status (multi-plant-aware path): tag negative/unproven
+            // plants in red within the title instead of hiding anything.
+            const plantStatusRe = /\n__PLANT_STATUS:([^=\n]+)=(POSITIVE|NEGATIVE|NONE)__/g;
             const plantStatuses = [];
             let sm;
             while ((sm = plantStatusRe.exec(text)) !== null) {
-              plantStatuses.push({ name: sm[1].trim().toLowerCase(), effective: sm[2] === 'EFFECTIVE' });
+              plantStatuses.push({ name: sm[1].trim().toLowerCase(), status: sm[2] });
             }
             text = text.replace(plantStatusRe, '');
 
@@ -378,24 +378,28 @@
             if (plantStatuses.length > 0 && plantCard) {
               const nameEl = plantCard.querySelector('.plant-name');
               const currentNames = (nameEl?.dataset.names || '').split(',').map(s => s.trim()).filter(Boolean);
-              const ineffective = new Set(plantStatuses.filter(p => !p.effective).map(p => p.name));
-              const remaining = currentNames.filter(n => !ineffective.has(n.toLowerCase()));
+              let flags = {};
+              try { flags = JSON.parse(nameEl?.dataset.flags || '{}'); } catch (_) { flags = {}; }
 
-              if (remaining.length === 0) {
-                plantCard.remove();
-              } else if (nameEl && remaining.length < currentNames.length) {
-                nameEl.textContent = remaining.join(', ');
-                nameEl.dataset.names = remaining.join(', ');
+              plantStatuses.forEach(p => {
+                const match = currentNames.find(n => n.toLowerCase() === p.name);
+                if (!match) return;
+                if (p.status === 'NEGATIVE' || p.status === 'NONE') {
+                  flags[match] = p.status;
+                } else {
+                  delete flags[match];
+                }
+              });
+
+              if (nameEl) {
+                nameEl.innerHTML = buildPlantNameHtml(currentNames, flags);
+                nameEl.dataset.flags = JSON.stringify(flags);
               }
+
+              const allFlagged = currentNames.length > 0 && currentNames.every(n => flags[n]);
+              if (allFlagged) markCardNegative(plantCard);
             } else if (verdictMatch && verdictMatch[1] === 'NEGATIVE' && plantCard) {
-              plantCard.classList.add('negative-card');
-              const h3 = plantCard.querySelector('h3');
-              if (h3 && !h3.querySelector('.verdict-negative')) {
-                const badge = document.createElement('span');
-                badge.className = 'verdict-negative';
-                badge.textContent = ' 🛑 Negative or irrelevant impact';
-                h3.appendChild(badge);
-              }
+              markCardNegative(plantCard);
             }
           }
 
@@ -409,6 +413,27 @@
       }
 
       window.exploreArticle = exploreArticle;
+
+      function buildPlantNameHtml(names, flags) {
+        return names.map(n => {
+          const flag = flags[n];
+          if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative</span>`;
+          if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">Not proven</span>`;
+          return esc(n);
+        }).join(', ');
+      }
+
+      function markCardNegative(plantCard) {
+        if (!plantCard) return;
+        plantCard.classList.add('negative-card');
+        const h3 = plantCard.querySelector('h3');
+        if (h3 && !h3.querySelector('.verdict-negative')) {
+          const badge = document.createElement('span');
+          badge.className = 'verdict-negative';
+          badge.textContent = ' 🛑 Negative or irrelevant impact';
+          h3.appendChild(badge);
+        }
+      }
 
       function renderPlantCard(x) {
         const list = (x.top_studies || []).map(s => `
@@ -428,12 +453,21 @@
           </div>
         `).join("");
 
+        const plantNames = String(x.plant || "").split(',').map(s => s.trim()).filter(Boolean);
+        const plantFlags = x.plant_flags || {};
+        // On a fresh load, a card that's already fully flagged shows the general red
+        // badge below — per-plant tags would just repeat the same information. They
+        // stay useful (and are shown) only for a mixed card, or right after a live
+        // "Explore" click, where they're the only signal of what just happened.
+        const allFlagged = plantNames.length > 0 && plantNames.every(n => plantFlags[n]);
+        const displayFlags = allFlagged ? {} : plantFlags;
+
         const negativeClass = x.has_negative ? ' negative-card' : '';
         const negativeBadge = x.has_negative ? ' <span class="verdict-negative"> 🛑 Negative or irrelevant impact</span>' : '';
         return `
           <div class="card${negativeClass}">
             <h3 style="margin:0">
-              <span class="plant-name" data-names="${esc(String(x.plant))}">${esc(String(x.plant))}</span>${negativeBadge}
+              <span class="plant-name" data-names="${esc(String(x.plant))}" data-flags="${esc(JSON.stringify(plantFlags))}">${buildPlantNameHtml(plantNames, displayFlags)}</span>${negativeBadge}
               <span class="badge" data-tooltip="Evidence score (top 5 studies):&#10;• Meta-analysis / systematic review: +5&#10;• Randomized trial (RCT): +4&#10;• Clinical trial: +2&#10;• Cohort / case-control: +1&#10;• Recency bonus: (year − 2015) × 0.2&#10;Higher = stronger scientific evidence" style="cursor:help;">publication relevance score ${esc(String(x.score))}</span>
             </h3>
             <p>${esc(String(x.summary || ""))}</p>

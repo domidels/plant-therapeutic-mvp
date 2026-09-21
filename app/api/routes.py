@@ -43,7 +43,7 @@ from app.services.turso_db import (
     increment_searched,
     insert_resume,
     get_negative_pub_ids,
-    get_negative_plants_for_condition,
+    get_plant_verdicts_for_condition,
     upsert_plant_verdict,
     # generic db helpers
     db_fetchone,
@@ -833,23 +833,24 @@ async def recommendations(
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    # Drop plants previously confirmed (via LLM explanation) to have no meaningful or a
-    # negative effect on this condition, and drop whole cards whose plants are all excluded.
+    # Flag plants previously confirmed (via LLM explanation) to have a negative/adverse
+    # or no meaningful effect on this condition — shown in red with a tag, never hidden.
     try:
-        negative_plants = await get_negative_plants_for_condition(condition)
+        plant_verdicts = await get_plant_verdicts_for_condition(condition)
     except Exception:
-        negative_plants = set()
+        plant_verdicts = {}
 
-    if negative_plants:
-        filtered_results: List[Dict[str, Any]] = []
-        for r in results:
-            names = [p.strip() for p in r["plant"].split(",") if p.strip()]
-            remaining = [p for p in names if p.lower() not in negative_plants]
-            if not remaining:
-                continue
-            r["plant"] = ", ".join(remaining)
-            filtered_results.append(r)
-        results = filtered_results
+    for r in results:
+        names = [p.strip() for p in r["plant"].split(",") if p.strip()]
+        flags = {}
+        for n in names:
+            v = plant_verdicts.get(n.lower())
+            if v == 1:
+                flags[n] = "NEGATIVE"
+            elif v == 2:
+                flags[n] = "NONE"
+        r["plant_flags"] = flags
+        r["_all_flagged"] = bool(names) and len(flags) == len(names)
 
     # Enrich results with cached verdict — single batch query.
     # Keys are scoped per (pmid, plant, condition): see _pub_cache_id.
@@ -866,7 +867,7 @@ async def recommendations(
             _pub_cache_id(s["pmid"], r["plant"], condition) in negative_ids
             for s in r["top_studies"]
         )
-        r["has_negative"] = llm_negative or r.pop("keyword_negative", False)
+        r["has_negative"] = llm_negative or r.pop("keyword_negative", False) or r.pop("_all_flagged", False)
 
     return {"condition": condition, "search_query": search_query, "results": results}
 
@@ -908,14 +909,15 @@ async def explore_stream(
             yield f"\n__VERDICT:{verdict_label}__"
 
             # Re-derive per-plant status from the persisted verdict table so the UI can
-            # still drop ineffective plants / empty cards on a cache hit.
+            # still flag negative/unproven plants in red on a cache hit.
             if parts_pl and raw_condition:
                 try:
-                    negative_plants = await get_negative_plants_for_condition(raw_condition)
+                    verdict_map = await get_plant_verdicts_for_condition(raw_condition)
                 except Exception:
-                    negative_plants = set()
+                    verdict_map = {}
                 for p in parts_pl:
-                    status = "INEFFECTIVE" if p.lower() in negative_plants else "EFFECTIVE"
+                    code = verdict_map.get(p.lower())
+                    status = {1: "NEGATIVE", 2: "NONE"}.get(code, "POSITIVE")
                     yield f"\n__PLANT_STATUS:{p}={status}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
@@ -1126,12 +1128,13 @@ async def explore_stream(
         verdict_int = 1 if verdict == "NEGATIVE" else 0
         yield f"\n__VERDICT:{verdict}__"
 
+        verdict_code = {"POSITIVE": 0, "NEGATIVE": 1, "NONE": 2}
+
         for p in parts_pl:
             word = plant_verdicts.get(p.lower())
             if not word:
                 continue
-            status = "INEFFECTIVE" if word in ("NEGATIVE", "NONE") else "EFFECTIVE"
-            yield f"\n__PLANT_STATUS:{p}={status}__"
+            yield f"\n__PLANT_STATUS:{p}={word}__"
 
         if raw_condition:
             for p in parts_pl:
@@ -1139,9 +1142,7 @@ async def explore_stream(
                 if not word:
                     continue
                 try:
-                    await upsert_plant_verdict(
-                        raw_condition, p, 1 if word in ("NEGATIVE", "NONE") else 0
-                    )
+                    await upsert_plant_verdict(raw_condition, p, verdict_code[word])
                 except Exception as e:
                     print(f"[turso] plant verdict upsert failed: {type(e).__name__}: {e}")
 

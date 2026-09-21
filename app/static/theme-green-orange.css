@@ -366,6 +366,29 @@ button.ai-btn:disabled{
   font-size: 0.85em;
 }
 
+/* Per-plant tag next to a name confirmed negative/unproven for this condition */
+.plant-flag{
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+.plant-flag-negative{
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+.plant-flag-none{
+  color: #8a6d1a;
+  background: #fdf3d9;
+  border: 1px solid #f0dfa8;
+}
+
 /* Tooltip générique */
 [data-tooltip]{
   position: relative;
