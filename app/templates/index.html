@@ -383,12 +383,7 @@
 
               plantStatuses.forEach(p => {
                 const match = currentNames.find(n => n.toLowerCase() === p.name);
-                if (!match) return;
-                if (p.status === 'NEGATIVE' || p.status === 'NONE') {
-                  flags[match] = p.status;
-                } else {
-                  delete flags[match];
-                }
+                if (match) flags[match] = p.status; // keep POSITIVE too, needed for card coloring
               });
 
               if (nameEl) {
@@ -396,8 +391,7 @@
                 nameEl.dataset.flags = JSON.stringify(flags);
               }
 
-              const allFlagged = currentNames.length > 0 && currentNames.every(n => flags[n]);
-              if (allFlagged) markCardNegative(plantCard);
+              applyCardStatusColor(plantCard, currentNames, flags);
             } else if (verdictMatch && verdictMatch[1] === 'NEGATIVE' && plantCard) {
               markCardNegative(plantCard);
             }
@@ -435,6 +429,25 @@
         }
       }
 
+      function applyCardStatusColor(plantCard, currentNames, flags) {
+        if (!plantCard) return;
+        const knownBad = currentNames.filter(n => flags[n] === 'NEGATIVE' || flags[n] === 'NONE').length;
+        const knownPositive = currentNames.filter(n => flags[n] === 'POSITIVE').length;
+        const allFlagged = currentNames.length > 0 && knownBad === currentNames.length;
+
+        plantCard.classList.remove('negative-card', 'mixed-card', 'positive-card');
+        const oldBadge = plantCard.querySelector('h3 .verdict-negative');
+        if (oldBadge) oldBadge.remove();
+
+        if (allFlagged) {
+          markCardNegative(plantCard);
+        } else if (knownBad > 0 && knownPositive > 0) {
+          plantCard.classList.add('mixed-card');
+        } else if (knownPositive > 0) {
+          plantCard.classList.add('positive-card');
+        }
+      }
+
       function renderPlantCard(x) {
         const list = (x.top_studies || []).map(s => `
           <div class="pmids">
@@ -462,10 +475,11 @@
         const allFlagged = plantNames.length > 0 && plantNames.every(n => plantFlags[n]);
         const displayFlags = allFlagged ? {} : plantFlags;
 
-        const negativeClass = x.has_negative ? ' negative-card' : '';
+        const statusClass = { red: ' negative-card', yellow: ' mixed-card', green: ' positive-card' }[x.status_color] || '';
+        const cardColorClass = x.has_negative ? ' negative-card' : statusClass;
         const negativeBadge = x.has_negative ? ' <span class="verdict-negative"> 🛑 Negative or irrelevant impact</span>' : '';
         return `
-          <div class="card${negativeClass}">
+          <div class="card${cardColorClass}">
             <h3 style="margin:0">
               <span class="plant-name" data-names="${esc(String(x.plant))}" data-flags="${esc(JSON.stringify(plantFlags))}">${buildPlantNameHtml(plantNames, displayFlags)}</span>${negativeBadge}
               <span class="badge" data-tooltip="Evidence score (top 5 studies):&#10;• Meta-analysis / systematic review: +5&#10;• Randomized trial (RCT): +4&#10;• Clinical trial: +2&#10;• Cohort / case-control: +1&#10;• Recency bonus: (year − 2015) × 0.2&#10;Higher = stronger scientific evidence" style="cursor:help;">publication relevance score ${esc(String(x.score))}</span>

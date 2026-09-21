@@ -843,14 +843,22 @@ async def recommendations(
     for r in results:
         names = [p.strip() for p in r["plant"].split(",") if p.strip()]
         flags = {}
+        known_positive = 0
+        known_bad = 0
         for n in names:
             v = plant_verdicts.get(n.lower())
             if v == 1:
                 flags[n] = "NEGATIVE"
+                known_bad += 1
             elif v == 2:
                 flags[n] = "NONE"
+                known_bad += 1
+            elif v == 0:
+                known_positive += 1
         r["plant_flags"] = flags
         r["_all_flagged"] = bool(names) and len(flags) == len(names)
+        r["_known_positive"] = known_positive
+        r["_known_bad"] = known_bad
 
     # Enrich results with cached verdict — single batch query.
     # Keys are scoped per (pmid, plant, condition): see _pub_cache_id.
@@ -867,7 +875,18 @@ async def recommendations(
             _pub_cache_id(s["pmid"], r["plant"], condition) in negative_ids
             for s in r["top_studies"]
         )
+        known_positive = r.pop("_known_positive", 0)
+        known_bad = r.pop("_known_bad", 0)
         r["has_negative"] = llm_negative or r.pop("keyword_negative", False) or r.pop("_all_flagged", False)
+
+        if r["has_negative"]:
+            r["status_color"] = "red"
+        elif known_bad > 0 and known_positive > 0:
+            r["status_color"] = "yellow"
+        elif known_positive > 0:
+            r["status_color"] = "green"
+        else:
+            r["status_color"] = None
 
     return {"condition": condition, "search_query": search_query, "results": results}
 

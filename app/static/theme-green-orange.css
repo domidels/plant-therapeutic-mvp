@@ -18,6 +18,16 @@
   --danger-bg: #fbeceb;
   --danger-border: #f0c9c6;
 
+  /* Mitigé (certaines plantes positives, d'autres non) — ambre sobre */
+  --warning: #8a6d1a;
+  --warning-bg: #fdf3d9;
+  --warning-border: #f0dfa8;
+
+  /* Positif confirmé (toutes les plantes) — vert sobre, teinte de l'accent */
+  --success: var(--primary-dark);
+  --success-bg: var(--primary-light);
+  --success-border: #c7e3d5;
+
   /* UI */
   --ring: 0 0 0 3px rgba(31,111,79,.14);
   --radius: 10px;
@@ -360,6 +370,23 @@ button.ai-btn:disabled{
   background: var(--surface) !important;
   border-color: var(--danger-border) !important;
 }
+
+/* Mixed-evidence card — some plants positive, others not (informative middle state) */
+.card.mixed-card,
+.card.mixed-card:hover {
+  background: var(--warning-bg) !important;
+  border-color: var(--warning-border) !important;
+  border-left: 3px solid var(--warning);
+}
+
+/* All plants confirmed positive for this condition */
+.card.positive-card,
+.card.positive-card:hover {
+  background: var(--success-bg) !important;
+  border-color: var(--success-border) !important;
+  border-left: 3px solid var(--success);
+}
+
 .verdict-negative{
   color: var(--danger);
   font-weight: 600;
@@ -384,9 +411,9 @@ button.ai-btn:disabled{
   border: 1px solid var(--danger-border);
 }
 .plant-flag-none{
-  color: #8a6d1a;
-  background: #fdf3d9;
-  border: 1px solid #f0dfa8;
+  color: var(--warning);
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
 }
 
 /* Tooltip générique */
