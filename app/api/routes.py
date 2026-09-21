@@ -720,6 +720,26 @@ async def condition_query(
     }
 
 
+_MARKER_LINE_PREFIXES = ("PLANT_VERDICT:", "VERDICT:")
+
+
+def _is_marker_line(line: str) -> bool:
+    """True if ``line`` is one of our internal verdict markers, not article text."""
+    return line.strip().upper().startswith(_MARKER_LINE_PREFIXES)
+
+
+def _pending_is_safe_to_flush(pending: str) -> bool:
+    """False while ``pending`` (a not-yet-newline-terminated line fragment) is either
+    a short ambiguous prefix of a marker keyword, or has already grown past one
+    (confirmed marker line in progress) — in both cases it must be held back
+    until the line's terminating newline resolves it."""
+    upper = pending.upper()
+    for prefix in _MARKER_LINE_PREFIXES:
+        if upper.startswith(prefix) or prefix.startswith(upper):
+            return False
+    return True
+
+
 def _pub_cache_id(pmid: str, plant: str, condition: str) -> str:
     """Cache key scoping a summary to its (article, plant, condition) triple.
 
@@ -1041,16 +1061,32 @@ async def explore_stream(
 
     async def event_generator():
         buf_parts: List[str] = []
+        pending = ""  # tail of the raw stream not yet confirmed safe to show
         try:
             async for chunk in _llm_chat_stream(messages, max_tokens=320, temperature=0.0):
                 buf_parts.append(chunk)
-                yield chunk
+                pending += chunk
+
+                # Hold back marker lines (PLANT_VERDICT:/VERDICT:) so they never
+                # reach the visible output — only flush text once a full line is
+                # confirmed to not be one of them.
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    if not _is_marker_line(line):
+                        yield line + "\n"
+
+                if pending and _pending_is_safe_to_flush(pending):
+                    yield pending
+                    pending = ""
         except Exception as e:
             err = f"\n[ERROR] LLM call failed: {type(e).__name__}: {e}\n"
             print(err)
             traceback.print_exc()
             yield err
             return
+
+        if pending and not _is_marker_line(pending):
+            yield pending
 
         refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         yield refs
