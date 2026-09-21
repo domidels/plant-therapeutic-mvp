@@ -189,7 +189,7 @@
       let START_YEAR = THIS_YEAR;
 
       // Incremental search state — tracks what is already rendered
-      let _state = { condition: null, llmQuery: null, loadedYears: new Set() };
+      let _state = { condition: null, llmQuery: null, displayCondition: null, loadedYears: new Set() };
 
       function showTypewriterHtmlLines(el, html, lineDelay = 1800) {
         if (!el) return;
@@ -329,6 +329,7 @@
         try{
           const qs = new URLSearchParams({ pmid });
           if (plant) qs.set('plant', plant);
+          if (_state.displayCondition) qs.set('condition', _state.displayCondition);
 
           const r = await fetch(`/api/explore_stream?${qs.toString()}`, {
             cache: 'no-store',
@@ -352,22 +353,48 @@
             if (pre) pre.textContent += chunk;
           }
 
-          // Parse verdict marker emitted at end of stream
+          // Parse markers emitted at end of stream
           if (pre) {
-            const verdictMatch = pre.textContent.match(/\n__VERDICT:(NEGATIVE|POSITIVE)__/);
-            if (verdictMatch) {
-              pre.textContent = pre.textContent.replace(/\n__VERDICT:[A-Z]+__/, '').trimEnd();
-              if (verdictMatch[1] === 'NEGATIVE') {
-                const plantCard = btnEl.closest('.card');
-                if (plantCard) plantCard.classList.add('negative-card');
-                // Add 🛑 to the plant card <h3> title (once only)
-                const h3 = plantCard?.querySelector('h3');
-                if (h3 && !h3.querySelector('.verdict-negative')) {
-                  const badge = document.createElement('span');
-                  badge.className = 'verdict-negative';
-                  badge.textContent = ' 🛑 Negative or irrelevant impact';
-                  h3.appendChild(badge);
-                }
+            let text = pre.textContent;
+
+            // Per-plant status (multi-plant-aware path): drop ineffective plants
+            // from the card title, or the whole card if none remain effective.
+            const plantStatusRe = /\n__PLANT_STATUS:([^=\n]+)=(EFFECTIVE|INEFFECTIVE)__/g;
+            const plantStatuses = [];
+            let sm;
+            while ((sm = plantStatusRe.exec(text)) !== null) {
+              plantStatuses.push({ name: sm[1].trim().toLowerCase(), effective: sm[2] === 'EFFECTIVE' });
+            }
+            text = text.replace(plantStatusRe, '');
+
+            // Overall verdict (legacy fallback path, used only when no plant context
+            // was available to attribute the verdict to specific plants).
+            const verdictMatch = text.match(/\n__VERDICT:(NEGATIVE|POSITIVE)__/);
+            text = text.replace(/\n__VERDICT:[A-Z]+__/, '').trimEnd();
+            pre.textContent = text;
+
+            const plantCard = btnEl.closest('.card');
+
+            if (plantStatuses.length > 0 && plantCard) {
+              const nameEl = plantCard.querySelector('.plant-name');
+              const currentNames = (nameEl?.dataset.names || '').split(',').map(s => s.trim()).filter(Boolean);
+              const ineffective = new Set(plantStatuses.filter(p => !p.effective).map(p => p.name));
+              const remaining = currentNames.filter(n => !ineffective.has(n.toLowerCase()));
+
+              if (remaining.length === 0) {
+                plantCard.remove();
+              } else if (nameEl && remaining.length < currentNames.length) {
+                nameEl.textContent = remaining.join(', ');
+                nameEl.dataset.names = remaining.join(', ');
+              }
+            } else if (verdictMatch && verdictMatch[1] === 'NEGATIVE' && plantCard) {
+              plantCard.classList.add('negative-card');
+              const h3 = plantCard.querySelector('h3');
+              if (h3 && !h3.querySelector('.verdict-negative')) {
+                const badge = document.createElement('span');
+                badge.className = 'verdict-negative';
+                badge.textContent = ' 🛑 Negative or irrelevant impact';
+                h3.appendChild(badge);
               }
             }
           }
@@ -406,7 +433,7 @@
         return `
           <div class="card${negativeClass}">
             <h3 style="margin:0">
-              ${esc(String(x.plant))}${negativeBadge}
+              <span class="plant-name" data-names="${esc(String(x.plant))}">${esc(String(x.plant))}</span>${negativeBadge}
               <span class="badge" data-tooltip="Evidence score (top 5 studies):&#10;• Meta-analysis / systematic review: +5&#10;• Randomized trial (RCT): +4&#10;• Clinical trial: +2&#10;• Cohort / case-control: +1&#10;• Recency bonus: (year − 2015) × 0.2&#10;Higher = stronger scientific evidence" style="cursor:help;">publication relevance score ${esc(String(x.score))}</span>
             </h3>
             <p>${esc(String(x.summary || ""))}</p>
@@ -532,7 +559,7 @@
         }
 
         // New condition → full reset
-        _state = { condition: null, llmQuery: null, loadedYears: new Set() };
+        _state = { condition: null, llmQuery: null, displayCondition: null, loadedYears: new Set() };
 
         out.innerHTML = `
           <div id="searchInfo" class="search-banner muted">Thinking about your condition…<span class="spinner" id="globalSpinner"></span></div>
@@ -600,6 +627,7 @@
         // Save state for incremental reuse
         _state.condition = rawCond.toLowerCase();
         _state.llmQuery = llmQuery;
+        _state.displayCondition = correctedCondition;
 
         if (searchInfoEl) {
           const alsoText = synonymsList.length

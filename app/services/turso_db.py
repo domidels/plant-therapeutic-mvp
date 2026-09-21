@@ -158,6 +158,20 @@ async def init_db() -> None:
     """)
     await db_execute("""CREATE INDEX IF NOT EXISTS idx_user_searches_user ON user_searches(user_id);""")
 
+    # --- plant_condition_verdict (persisted per-plant relevance for a condition) ---
+    # Lets us remember, across searches, that a given plant showed no meaningful or
+    # a negative effect on a given condition — so it can be dropped from future
+    # results for that same condition instead of being re-surfaced every time.
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS plant_condition_verdict (
+            condition  TEXT NOT NULL,
+            plant      TEXT NOT NULL,
+            verdict    INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            PRIMARY KEY (condition, plant)
+        );
+    """)
+
 
 # ---------------------------------------------------------------------
 # pub_resume functions
@@ -195,6 +209,47 @@ async def get_negative_pub_ids(pub_ids: list[str]) -> set[str]:
             tuple(pub_ids),
         )
         return {row[0] for row in (rs.rows or [])}
+
+
+async def get_negative_plants_for_condition(condition: str) -> set[str]:
+    """Return the (normalized, lowercase) plant names previously confirmed to have
+    no meaningful or a negative effect on ``condition``.
+
+    Used to drop those plants — or whole result cards, when none of their
+    plants remain — from later searches of the same condition.
+    """
+    condition_key = (condition or "").strip().lower()
+    if not condition_key:
+        return set()
+    _check_cfg()
+    async with create_client(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as db:
+        rs = await db.execute(
+            "SELECT plant FROM plant_condition_verdict WHERE condition = ? AND verdict = 1;",
+            (condition_key,),
+        )
+        return {row[0] for row in (rs.rows or [])}
+
+
+async def upsert_plant_verdict(condition: str, plant: str, verdict: int) -> None:
+    """Persist whether ``plant`` has a positive (0) or negative/no (1) effect on ``condition``.
+
+    Last-verified-wins: a later explanation for the same (condition, plant) overwrites
+    the previous verdict.
+    """
+    condition_key = (condition or "").strip().lower()
+    plant_key = (plant or "").strip().lower()
+    if not condition_key or not plant_key:
+        return
+    await db_execute(
+        """
+        INSERT INTO plant_condition_verdict (condition, plant, verdict, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(condition, plant) DO UPDATE SET
+            verdict = excluded.verdict,
+            updated_at = CURRENT_TIMESTAMP;
+        """,
+        (condition_key, plant_key, verdict),
+    )
 
 
 async def insert_resume(pub_id: str, resume: str, verdict: Optional[int] = None) -> None:

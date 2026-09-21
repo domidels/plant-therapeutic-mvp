@@ -43,6 +43,8 @@ from app.services.turso_db import (
     increment_searched,
     insert_resume,
     get_negative_pub_ids,
+    get_negative_plants_for_condition,
+    upsert_plant_verdict,
     # generic db helpers
     db_fetchone,
     db_execute,
@@ -718,6 +720,19 @@ async def condition_query(
     }
 
 
+def _pub_cache_id(pmid: str, plant: str, condition: str) -> str:
+    """Cache key scoping a summary to its (article, plant, condition) triple.
+
+    The same PMID can surface under different plant groups (an article naming
+    several plants) and under different searched conditions (an article
+    relevant to more than one condition) — the cached explanation must not be
+    reused across those combinations.
+    """
+    plant_key = re.sub(r"\s+", " ", (plant or "").strip().lower())
+    condition_key = re.sub(r"\s+", " ", (condition or "").strip().lower())
+    return f"pub_{pmid}::{plant_key}::{condition_key}"
+
+
 @router.get("/recommendations")
 async def recommendations(
     condition: str = Query(..., min_length=2),
@@ -798,14 +813,39 @@ async def recommendations(
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    # Enrich results with cached verdict — single batch query
-    all_pub_ids = [f"pub_{s['pmid']}" for r in results for s in r["top_studies"] if s.get("pmid")]
+    # Drop plants previously confirmed (via LLM explanation) to have no meaningful or a
+    # negative effect on this condition, and drop whole cards whose plants are all excluded.
+    try:
+        negative_plants = await get_negative_plants_for_condition(condition)
+    except Exception:
+        negative_plants = set()
+
+    if negative_plants:
+        filtered_results: List[Dict[str, Any]] = []
+        for r in results:
+            names = [p.strip() for p in r["plant"].split(",") if p.strip()]
+            remaining = [p for p in names if p.lower() not in negative_plants]
+            if not remaining:
+                continue
+            r["plant"] = ", ".join(remaining)
+            filtered_results.append(r)
+        results = filtered_results
+
+    # Enrich results with cached verdict — single batch query.
+    # Keys are scoped per (pmid, plant, condition): see _pub_cache_id.
+    all_pub_ids = [
+        _pub_cache_id(s["pmid"], r["plant"], condition)
+        for r in results for s in r["top_studies"] if s.get("pmid")
+    ]
     try:
         negative_ids = await get_negative_pub_ids(all_pub_ids)
     except Exception:
         negative_ids = set()
     for r in results:
-        llm_negative = any(f"pub_{s['pmid']}" in negative_ids for s in r["top_studies"])
+        llm_negative = any(
+            _pub_cache_id(s["pmid"], r["plant"], condition) in negative_ids
+            for s in r["top_studies"]
+        )
         r["has_negative"] = llm_negative or r.pop("keyword_negative", False)
 
     return {"condition": condition, "search_query": search_query, "results": results}
@@ -815,12 +855,16 @@ async def recommendations(
 async def explore_stream(
     pmid: str = Query(..., min_length=1),
     plant: Optional[str] = Query(None, min_length=1),
+    condition: Optional[str] = Query(None, min_length=1),
     request: Request = None,
     _: None = Depends(require_human),
 ):
     user_id = await get_ip_user_id(request)
 
-    pub_id = f"pub_{pmid}"
+    raw_plant = (plant or "").strip()
+    raw_condition = (condition or "").strip()
+    parts_pl = [p.strip() for p in raw_plant.split(",") if p.strip()]
+    pub_id = _pub_cache_id(pmid, raw_plant, raw_condition)
 
     # 1) Turso cache — checked BEFORE any quota enforcement so cached summaries
     #    are always served even when the user's daily quota is exhausted.
@@ -842,6 +886,17 @@ async def explore_stream(
             yield f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             verdict_label = "NEGATIVE" if cached_verdict == 1 else "POSITIVE"
             yield f"\n__VERDICT:{verdict_label}__"
+
+            # Re-derive per-plant status from the persisted verdict table so the UI can
+            # still drop ineffective plants / empty cards on a cache hit.
+            if parts_pl and raw_condition:
+                try:
+                    negative_plants = await get_negative_plants_for_condition(raw_condition)
+                except Exception:
+                    negative_plants = set()
+                for p in parts_pl:
+                    status = "INEFFECTIVE" if p.lower() in negative_plants else "EFFECTIVE"
+                    yield f"\n__PLANT_STATUS:{p}={status}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
@@ -896,56 +951,92 @@ async def explore_stream(
     await enforce_global_quota(add_hf_tokens=est_hf)
     await enforce_quota(user_id, add_hf_tokens=est_hf, add_turso_ops=1)
 
-    raw_plant = (plant or "").strip()
-    if raw_plant:
-        parts_pl = [p.strip() for p in raw_plant.split(",") if p.strip()]
-        if len(parts_pl) == 1:
-            plant_for_prompt = parts_pl[0]
-        elif len(parts_pl) == 2:
-            plant_for_prompt = " and ".join(parts_pl)
-        else:
-            plant_for_prompt = ", ".join(parts_pl[:-1]) + " and " + parts_pl[-1]
+    if len(parts_pl) == 1:
+        plant_for_prompt = parts_pl[0]
+    elif len(parts_pl) == 2:
+        plant_for_prompt = " and ".join(parts_pl)
+    elif len(parts_pl) > 2:
+        plant_for_prompt = ", ".join(parts_pl[:-1]) + " and " + parts_pl[-1]
     else:
         plant_for_prompt = "all plants mentioned in the CONTEXT"
 
+    condition_for_prompt = raw_condition or "the condition being researched in this search"
+
     _SYSTEM = (
-        "You are a health science communicator writing for the general public.\n"
-        "Your goal is to summarise key findings from a scientific article in plain, accessible language.\n"
+        "You are a health science communicator explaining a scientific article to someone with "
+        "no medical or scientific background — think of a curious adult reading this on their phone.\n"
         "\n"
         "RULES:\n"
-        "1. Use simple, everyday words — avoid medical jargon or explain it when unavoidable.\n"
-        "2. Do NOT copy article identifiers, DOIs, or numeric codes.\n"
-        "3. Be factual and neutral — do not overstate preliminary or observational findings.\n"
-        "4. This is information only, not medical advice.\n"
+        "1. Write at a general-public reading level: short sentences, common everyday words.\n"
+        "2. If you must use a technical or medical term, immediately explain it in plain words right after (e.g. "
+        "\"anti-inflammatory (it reduces swelling)\").\n"
+        "3. Avoid statistical jargon — translate numbers into plain terms (e.g. \"improved in about 1 out of 3 "
+        "people\" rather than \"p<0.05\" or raw odds ratios).\n"
+        "4. Do NOT copy article identifiers, DOIs, or numeric codes.\n"
+        "5. Be factual and neutral — do not overstate preliminary or observational findings.\n"
+        "6. This is information only, not medical advice.\n"
     )
 
-    _USER_TMPL = (
-        "Study: {title} — {year} / {journal}\n\n"
+    _BASE_TMPL = (
+        "Study: {title} — {year} / {journal}\n"
+        "Health condition being researched: {condition}\n"
+        "Plant/supplement being evaluated: {plant}\n\n"
         "CONTEXT:\n{context}\n\n"
-        "Write ONE paragraph of 4–6 sentences that:\n"
-        "- States what the study examined and how (mention the study type if stated: RCT, meta-analysis, etc.).\n"
-        "- Explains specifically how {plant} acts on or affects the condition (mechanism, effect, outcome).\n"
-        "- Quantifies the effect if the CONTEXT provides numbers (e.g. dosage, percentage improvement).\n"
-        "- Mentions any limitations or caveats if stated in the CONTEXT.\n\n"
+        "Write ONE paragraph of 4–6 short sentences, in plain language for a general audience, that:\n"
+        "- States what the study looked at and how (describe the study type in plain terms, e.g. "
+        "\"a small trial\", \"a review that combined several studies\").\n"
+        "- Explains specifically how {plant} affects {condition} in this study — what changed, and why, in "
+        "everyday terms (not just \"the condition\" — name {condition} directly).\n"
+        "{multi_plant_rule}"
+        "- Gives the size of the effect in everyday terms if the CONTEXT provides numbers (e.g. dose, how many "
+        "people improved).\n"
+        "- Mentions any limitations or caveats from the CONTEXT, explained simply.\n\n"
         "Return ONLY the paragraph, with no title, no bullet points, and no disclaimer.\n\n"
-        "Then, on the very last line, write exactly one of:\n"
-        "VERDICT:NEGATIVE  (if {plant} has an adverse, harmful or contraindicated effect in this context, "
-        "or if the condition appears only as a side effect / adverse event of the treatment)\n"
-        "VERDICT:POSITIVE  (otherwise)"
     )
+
+    if len(parts_pl) > 1:
+        multi_plant_rule = (
+            "- More than one plant is listed above ({plant_list}) — address EACH one by name and say "
+            "plainly whether the CONTEXT supports an effect for THAT specific plant on {condition}, rather "
+            "than treating them as a single combined thing.\n"
+        ).format(plant_list=", ".join(parts_pl), condition=condition_for_prompt)
+    else:
+        multi_plant_rule = ""
+
+    user_content = _BASE_TMPL.format(
+        title=doc["title"],
+        year=doc["year"],
+        journal=doc["journal"],
+        context=context,
+        plant=plant_for_prompt,
+        condition=condition_for_prompt,
+        multi_plant_rule=multi_plant_rule,
+    )
+
+    if parts_pl:
+        verdict_lines = "\n".join(f"PLANT_VERDICT: {p}=<VERDICT>" for p in parts_pl)
+        user_content += (
+            "Then, on separate lines after the paragraph, output exactly one verdict line for EACH plant "
+            "listed below, in this exact format (replace <VERDICT> with one of POSITIVE, NEGATIVE or NONE — "
+            "do not add anything else on these lines):\n"
+            f"{verdict_lines}\n\n"
+            f"- POSITIVE: the CONTEXT shows this plant has a helpful/therapeutic effect on {condition_for_prompt}.\n"
+            f"- NEGATIVE: the CONTEXT shows this plant has an adverse, harmful or contraindicated effect on "
+            f"{condition_for_prompt}, or {condition_for_prompt} appears only as a side effect of it.\n"
+            f"- NONE: the CONTEXT does not show a meaningful effect of this plant on {condition_for_prompt}."
+        )
+    else:
+        user_content += (
+            "Then, on the very last line, write exactly one of:\n"
+            f"VERDICT:NEGATIVE  (if the treatment has an adverse, harmful or contraindicated effect on "
+            f"{condition_for_prompt}, or if {condition_for_prompt} appears only as a side effect / adverse "
+            "event of the treatment)\n"
+            "VERDICT:POSITIVE  (otherwise)"
+        )
 
     messages = [
         {"role": "system", "content": _SYSTEM},
-        {
-            "role": "user",
-            "content": _USER_TMPL.format(
-                title=doc["title"],
-                year=doc["year"],
-                journal=doc["journal"],
-                context=context,
-                plant=plant_for_prompt,
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
 
     async def event_generator():
@@ -966,17 +1057,57 @@ async def explore_stream(
 
         full_resume = "".join(buf_parts).strip()
 
-        # Parse and strip the VERDICT line the LLM appended
         import re as _re
-        verdict = "POSITIVE"
+
+        plant_verdicts: Dict[str, str] = {}
         clean_resume = full_resume
-        verdict_match = _re.search(r"\nVERDICT:(NEGATIVE|POSITIVE)", full_resume)
-        if verdict_match:
-            verdict = verdict_match.group(1)
-            clean_resume = full_resume[: verdict_match.start()].strip()
+
+        if parts_pl:
+            # Multi/single-plant path: one PLANT_VERDICT line per named plant.
+            for m in _re.finditer(
+                r"PLANT_VERDICT:\s*(.+?)\s*=\s*(POSITIVE|NEGATIVE|NONE)\b",
+                full_resume,
+                flags=_re.IGNORECASE,
+            ):
+                plant_verdicts[m.group(1).strip().lower()] = m.group(2).upper()
+            clean_resume = _re.sub(
+                r"\n?PLANT_VERDICT:.*", "", full_resume, flags=_re.IGNORECASE
+            ).strip()
+
+            parsed_words = [plant_verdicts.get(p.lower()) for p in parts_pl]
+            known_words = [w for w in parsed_words if w]
+            # Negative overall only if every plant we could parse came back
+            # NEGATIVE/NONE — i.e. none of them show a positive effect.
+            verdict = "NEGATIVE" if known_words and all(w in ("NEGATIVE", "NONE") for w in known_words) else "POSITIVE"
+        else:
+            # Legacy path (no plant context supplied): single VERDICT line.
+            verdict = "POSITIVE"
+            verdict_match = _re.search(r"\nVERDICT:(NEGATIVE|POSITIVE)", full_resume)
+            if verdict_match:
+                verdict = verdict_match.group(1)
+                clean_resume = full_resume[: verdict_match.start()].strip()
 
         verdict_int = 1 if verdict == "NEGATIVE" else 0
         yield f"\n__VERDICT:{verdict}__"
+
+        for p in parts_pl:
+            word = plant_verdicts.get(p.lower())
+            if not word:
+                continue
+            status = "INEFFECTIVE" if word in ("NEGATIVE", "NONE") else "EFFECTIVE"
+            yield f"\n__PLANT_STATUS:{p}={status}__"
+
+        if raw_condition:
+            for p in parts_pl:
+                word = plant_verdicts.get(p.lower())
+                if not word:
+                    continue
+                try:
+                    await upsert_plant_verdict(
+                        raw_condition, p, 1 if word in ("NEGATIVE", "NONE") else 0
+                    )
+                except Exception as e:
+                    print(f"[turso] plant verdict upsert failed: {type(e).__name__}: {e}")
 
         if clean_resume:
             try:
