@@ -436,7 +436,7 @@
         // with confidence. Green/yellow are shown only once the server recomputes
         // them from the full persisted history, on the next search/page load.
         if (!plantCard) return;
-        const knownBad = currentNames.filter(n => flags[n] === 'NEGATIVE' || flags[n] === 'NONE').length;
+        const knownBad = currentNames.filter(n => ['NEGATIVE', 'NONE', 'IRRELEVANT'].includes(flags[n])).length;
         const allFlagged = currentNames.length > 0 && knownBad === currentNames.length;
 
         if (allFlagged) {

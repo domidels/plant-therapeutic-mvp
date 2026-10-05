@@ -416,9 +416,9 @@ button.ai-btn:disabled{
   border: 1px solid var(--warning-border);
 }
 .plant-flag-irrelevant{
-  color: var(--muted);
-  background: var(--bg);
-  border: 1px solid var(--border);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px dashed var(--danger);
 }
 
 /* Tooltip générique */
