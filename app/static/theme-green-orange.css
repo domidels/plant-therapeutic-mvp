@@ -23,6 +23,8 @@
   --warning: #8a6d1a;
   --warning-bg: #fdf3d9;
   --warning-border: #f0dfa8;
+  --no-effect-bg: #fffbea;     /* pale pastel yellow for "No effect" cards */
+  --no-effect-border: #f5ecc4;
 
   /* Positif confirmé (toutes les plantes) — vert sobre, teinte de l'accent */
   --success: var(--primary-dark);
@@ -378,6 +380,14 @@ button.ai-btn:disabled{
   background: var(--warning-bg) !important;
   border-color: var(--warning-border) !important;
   border-left: 3px solid var(--warning);
+}
+
+/* No effect shown for this condition — pale pastel yellow, lighter than mixed-card */
+.card.no-effect-card,
+.card.no-effect-card:hover {
+  background: var(--no-effect-bg) !important;
+  border-color: var(--no-effect-border) !important;
+  border-left: 3px solid var(--warning-border);
 }
 
 /* All plants confirmed positive for this condition */

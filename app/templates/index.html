@@ -452,14 +452,16 @@
         return '<span class="verdict-negative">🛑 Negative effect</span>';
       }
 
+      // kind "negative" → red card; kind "none" → pale yellow card.
       function markCardNegative(plantCard, kind = 'negative') {
         if (!plantCard) return;
-        plantCard.classList.add('negative-card');
+        // Never downgrade a "Negative effect" card to "No effect".
+        if (kind === 'none' && plantCard.classList.contains('negative-card')) return;
+        plantCard.classList.remove('mixed-card', 'positive-card', 'negative-card', 'no-effect-card');
+        plantCard.classList.add(kind === 'none' ? 'no-effect-card' : 'negative-card');
         const h3 = plantCard.querySelector('h3');
         if (!h3) return;
         const existing = h3.querySelector('.verdict-negative');
-        // Never downgrade an existing "Negative effect" badge to "No effect".
-        if (existing && (kind === 'none' || !existing.classList.contains('verdict-none'))) return;
         const tmp = document.createElement('span');
         tmp.innerHTML = verdictBadgeHtml(kind);
         if (existing) existing.replaceWith(tmp.firstChild);
@@ -483,7 +485,9 @@
         } else if (allPositive && !plantCard.classList.contains('negative-card')) {
           // Never override red: it may come from a toxicity keyword or another
           // article's negative verdict, which a single positive one doesn't cancel.
-          plantCard.classList.remove('mixed-card');
+          // A "No effect" card can turn green once its plants are re-verified positive.
+          plantCard.classList.remove('mixed-card', 'no-effect-card');
+          plantCard.querySelector('.verdict-none')?.remove();
           plantCard.classList.add('positive-card');
         }
       }
@@ -516,7 +520,8 @@
         const displayFlags = allFlagged ? {} : plantFlags;
 
         const statusClass = { red: ' negative-card', yellow: ' mixed-card', green: ' positive-card' }[x.status_color] || '';
-        const cardColorClass = x.has_negative ? ' negative-card' : statusClass;
+        const negativeClass = x.negative_kind === 'none' ? ' no-effect-card' : ' negative-card';
+        const cardColorClass = x.has_negative ? negativeClass : statusClass;
         const negativeBadge = x.has_negative ? ' ' + verdictBadgeHtml(x.negative_kind) : '';
         return `
           <div class="card${cardColorClass}">
