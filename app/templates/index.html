@@ -414,7 +414,7 @@
           if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative</span>`;
           if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">Not proven</span>`;
           if (flag === 'IRRELEVANT') return `${esc(n)} <span class="plant-flag plant-flag-irrelevant">Irrelevant match</span>`;
-          if (flag === 'POSITIVE') return `${esc(n)} <span class="plant-flag plant-flag-relevant">Relevant</span>`;
+          if (flag === 'POSITIVE') return `${esc(n)} <span class="plant-flag plant-flag-positive">Positive effect</span>`;
           return esc(n);
         }).join(', ');
       }
@@ -494,6 +494,24 @@
         `;
       }
 
+      // Right-hand year menu — only shown when results span several years.
+      function updateYearNav() {
+        const nav = document.getElementById("yearNav");
+        const yearsEl = document.getElementById("years");
+        if (!nav || !yearsEl) return;
+        const ids = [...yearsEl.querySelectorAll(".year-block")].map(sec => sec.id);
+        nav.hidden = ids.length < 2;
+        nav.innerHTML = ids.map(id => `<a href="#${id}" data-target="${id}">${esc(id.slice(1))}</a>`).join("");
+      }
+
+      document.addEventListener("click", (ev) => {
+        const link = ev.target.closest(".year-nav a");
+        if (!link) return;
+        ev.preventDefault();
+        const sec = document.getElementById(link.dataset.target);
+        if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+
       async function runApiByYear(condition, llmQuery, years, append = false) {
         const yearsEl = document.getElementById("years");
         const progressEl = document.getElementById("progress");
@@ -514,6 +532,7 @@
         } else {
           yearsEl.innerHTML = html;
         }
+        updateYearNav();
 
         const doYear = async (year) => {
           const sec = document.getElementById(`y${year}`);
@@ -632,6 +651,8 @@
           </div>
 
           <div id="progress" class="muted" style="margin-top:.5rem"></div>
+          <p class="card-legend muted"><span class="legend-swatch legend-swatch--positive"></span>Green card: plant with a positive effect on the condition (previously verified)</p>
+          <nav id="yearNav" class="year-nav" aria-label="Jump to year" hidden></nav>
           <div id="years"></div>
         `;
 

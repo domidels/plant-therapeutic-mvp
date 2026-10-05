@@ -420,7 +420,7 @@ button.ai-btn:disabled{
   background: var(--surface);
   border: 1px dashed var(--danger);
 }
-.plant-flag-relevant{
+.plant-flag-positive{
   color: var(--success);
   background: var(--success-bg);
   border: 1px solid var(--success-border);
@@ -667,4 +667,61 @@ footer{
   display: flex;
   justify-content: center;
   margin: 14px 0 4px;
+}
+
+/* Card color legend above the results */
+.card-legend{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin: .5rem 0;
+}
+.legend-swatch{
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  flex: none;
+}
+.legend-swatch--positive{
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-left: 3px solid var(--success);
+}
+
+/* Right-hand year menu (only when several years are listed) */
+.year-nav{
+  position: fixed;
+  top: 50%;
+  right: 16px;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-hover);
+  z-index: 10;
+}
+.year-nav[hidden]{ display: none; }
+.year-nav a{
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-decoration: none;
+}
+.year-nav a:hover{
+  color: var(--primary-dark);
+  background: var(--primary-light);
+}
+.year-block{ scroll-margin-top: 16px; }
+@media (max-width: 900px){
+  .year-nav{ display: none; }
 }
