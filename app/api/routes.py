@@ -890,7 +890,18 @@ async def recommendations(
         )
         known_positive = r.pop("_known_positive", 0)
         known_bad = r.pop("_known_bad", 0)
-        r["has_negative"] = llm_negative or r.pop("keyword_negative", False) or r.pop("_all_flagged", False)
+        keyword_negative = r.pop("keyword_negative", False)
+        r["has_negative"] = llm_negative or keyword_negative or r.pop("_all_flagged", False)
+
+        # Which red badge to show: "none" (no effect shown) only when every flagged
+        # plant is NONE and no toxicity keyword fired; anything else is "negative".
+        flag_values = set(r["plant_flags"].values())
+        if not r["has_negative"]:
+            r["negative_kind"] = None
+        elif not keyword_negative and flag_values == {"NONE"}:
+            r["negative_kind"] = "none"
+        else:
+            r["negative_kind"] = "negative"
 
         if r["has_negative"]:
             r["status_color"] = "red"

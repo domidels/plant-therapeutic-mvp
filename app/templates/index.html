@@ -71,7 +71,7 @@
       <p class="muted intro-box">
         This tool summarizes <em>peer-reviewed</em> research from PubMed — <strong>information only, not medical advice.</strong>
         Searches condition title and primary MeSH topics, expanded with clinical synonyms.
-        Detects plants and supplements in abstracts, flags negative or irrelevant findings, and ranks results by evidence strength (meta-analyses, Randomized Clinical Trials, recency).
+        Detects plants and supplements in abstracts, flags findings showing no impact or a negative impact, and ranks results by evidence strength (meta-analyses, Randomized Clinical Trials, recency).
       </p>
 
       <div class="row">
@@ -411,24 +411,34 @@
       function buildPlantNameHtml(names, flags) {
         return names.map(n => {
           const flag = flags[n];
-          if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative</span>`;
-          if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">Not proven</span>`;
+          if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative effect</span>`;
+          if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">No effect</span>`;
           if (flag === 'IRRELEVANT') return `${esc(n)} <span class="plant-flag plant-flag-irrelevant">Irrelevant match</span>`;
           if (flag === 'POSITIVE') return `${esc(n)} <span class="plant-flag plant-flag-positive">Positive effect</span>`;
           return esc(n);
         }).join(', ');
       }
 
-      function markCardNegative(plantCard) {
+      // kind: "negative" (red stop sign) or "none" (exclamation mark, no effect shown).
+      function verdictBadgeHtml(kind) {
+        if (kind === 'none') {
+          return '<span class="verdict-negative verdict-none"><span class="verdict-icon" aria-hidden="true">!</span>No effect</span>';
+        }
+        return '<span class="verdict-negative">🛑 Negative effect</span>';
+      }
+
+      function markCardNegative(plantCard, kind = 'negative') {
         if (!plantCard) return;
         plantCard.classList.add('negative-card');
         const h3 = plantCard.querySelector('h3');
-        if (h3 && !h3.querySelector('.verdict-negative')) {
-          const badge = document.createElement('span');
-          badge.className = 'verdict-negative';
-          badge.textContent = ' 🛑 Negative or irrelevant impact';
-          h3.appendChild(badge);
-        }
+        if (!h3) return;
+        const existing = h3.querySelector('.verdict-negative');
+        // Never downgrade an existing "Negative effect" badge to "No effect".
+        if (existing && (kind === 'none' || !existing.classList.contains('verdict-none'))) return;
+        const tmp = document.createElement('span');
+        tmp.innerHTML = verdictBadgeHtml(kind);
+        if (existing) existing.replaceWith(tmp.firstChild);
+        else h3.querySelector('.plant-name')?.after(tmp.firstChild);
       }
 
       function applyCardStatusColor(plantCard, currentNames, flags) {
@@ -443,7 +453,8 @@
 
         if (allFlagged) {
           plantCard.classList.remove('mixed-card', 'positive-card');
-          markCardNegative(plantCard);
+          const anyNegative = currentNames.some(n => flags[n] === 'NEGATIVE');
+          markCardNegative(plantCard, anyNegative ? 'negative' : 'none');
         } else if (allPositive && !plantCard.classList.contains('negative-card')) {
           // Never override red: it may come from a toxicity keyword or another
           // article's negative verdict, which a single positive one doesn't cancel.
@@ -481,7 +492,7 @@
 
         const statusClass = { red: ' negative-card', yellow: ' mixed-card', green: ' positive-card' }[x.status_color] || '';
         const cardColorClass = x.has_negative ? ' negative-card' : statusClass;
-        const negativeBadge = x.has_negative ? ' <span class="verdict-negative"> 🛑 Negative or irrelevant impact</span>' : '';
+        const negativeBadge = x.has_negative ? ' ' + verdictBadgeHtml(x.negative_kind) : '';
         return `
           <div class="card${cardColorClass}">
             <h3 style="margin:0">

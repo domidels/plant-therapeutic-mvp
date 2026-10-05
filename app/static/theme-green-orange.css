@@ -17,6 +17,7 @@
   --danger: #b3261e;
   --danger-bg: #fbeceb;
   --danger-border: #f0c9c6;
+  --danger-pastel: #d46a62; /* softer red for "Negative effect" labels, still readable on --danger-bg */
 
   /* Mitigé (certaines plantes positives, d'autres non) — ambre sobre */
   --warning: #8a6d1a;
@@ -388,9 +389,26 @@ button.ai-btn:disabled{
 }
 
 .verdict-negative{
-  color: var(--danger);
+  color: var(--danger-pastel);
   font-weight: 600;
   font-size: 0.85em;
+}
+.verdict-negative{ margin-left: 4px; }
+/* "No effect" badge: amber exclamation mark instead of the red stop sign */
+.verdict-none{ color: var(--warning); }
+.verdict-icon{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15em;
+  height: 1.15em;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: var(--warning);
+  color: #fff;
+  font-weight: 800;
+  font-size: 0.9em;
+  vertical-align: -0.1em;
 }
 
 /* Per-plant tag next to a name confirmed negative/unproven for this condition */
@@ -406,7 +424,7 @@ button.ai-btn:disabled{
   margin-left: 2px;
 }
 .plant-flag-negative{
-  color: var(--danger);
+  color: var(--danger-pastel);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
 }
