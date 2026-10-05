@@ -57,12 +57,21 @@ async def _sleep_backoff(attempt: int):
 
 
 async def _get_with_retry(
-    client: httpx.AsyncClient, url: str, params: dict, headers: dict, max_tries: int = 5
+    client: httpx.AsyncClient,
+    url: str,
+    params: dict,
+    headers: dict,
+    max_tries: int = 5,
+    post: bool = False,
 ) -> httpx.Response:
+    # post=True sends params as a form body (NCBI recommends POST for long id lists)
     last_exc = None
     for attempt in range(max_tries):
         try:
-            r = await client.get(url, params=params, headers=headers)
+            if post:
+                r = await client.post(url, data=params, headers=headers)
+            else:
+                r = await client.get(url, params=params, headers=headers)
             if r.status_code in (429, 500, 502, 503, 504):
                 await _sleep_backoff(attempt)
                 continue
@@ -143,7 +152,9 @@ async def efetch(client: httpx.AsyncClient, pmids: List[str]) -> List[Dict]:
         "id": ",".join(pmids),
         **_common_params(),
     }
-    r = await _get_with_retry(client, f"{BASE}/efetch.fcgi", params=params, headers=_headers())
+    r = await _get_with_retry(
+        client, f"{BASE}/efetch.fcgi", params=params, headers=_headers(), post=True
+    )
 
     from lxml import etree
 
@@ -197,11 +208,7 @@ async def efetch(client: httpx.AsyncClient, pmids: List[str]) -> List[Dict]:
 async def search_and_fetch(condition: str, from_year: str, to_year: str) -> List[Dict]:
     query = build_query(condition, from_year, to_year)
     async with _client() as client:
-        ids = await esearch_all(client, query, page_size=60, cap=120)
-        out_efetch: List[Dict] = []
-        # Small batches to reduce network errors
-        for i in range(0, len(ids), 20):
-            subids = ids[i : i + 20]
-            out_efetch.extend(await efetch(client, subids))
-            await asyncio.sleep(0.2)
-        return out_efetch
+        # One esearch page + one POSTed efetch: 2 NCBI round trips per range
+        # instead of ~8 sequential ones.
+        ids = await esearch_all(client, query, page_size=120, cap=120)
+        return await efetch(client, ids)
