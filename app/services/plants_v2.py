@@ -1,4 +1,5 @@
 import csv
+import os
 from pathlib import Path
 from typing import Dict, List
 import unicodedata
@@ -75,6 +76,36 @@ def token_regex(term: str) -> str:
     parts = [re.escape(p) for p in re.split(r"[\s\-_/]+", term) if p]
     inner = r"[-\s_]*".join(parts)
     return rf"(?<![\p{{L}}\p{{N}}]){inner}(?![\p{{L}}\p{{N}}])"
+
+_BINOMIAL_RE = re.compile(r"^[a-z]+(?:[\s\-_]+)[a-z]+$")
+
+# Set PLANTS_DEBUG=1 to trace detection steps (very verbose: several lines per article).
+_DEBUG = os.getenv("PLANTS_DEBUG") == "1"
+
+def _debug(*args) -> None:
+    if _DEBUG:
+        print(*args)
+
+# Compiled alias patterns, keyed by id(plant_db). Compiling ~1k token regexes per
+# article (the regex module's cache is too small to hold them) dominated search latency.
+_COMPILED: Dict[int, tuple] = {}
+
+def _compiled_plants(plant_db: List[Dict]) -> List[tuple]:
+    """Return ``[(canonical, [(term, pattern, is_binomial), ...]), ...]`` for ``plant_db``."""
+    cached = _COMPILED.get(id(plant_db))
+    if cached is not None and cached[0] is plant_db:
+        return cached[1]
+    compiled = []
+    for p in plant_db:
+        terms = []
+        for a in p["aliases"]:
+            term = norm(a)
+            if term:
+                pattern = re.compile(token_regex(term), flags=re.IGNORECASE)
+                terms.append((term, pattern, bool(_BINOMIAL_RE.match(term))))
+        compiled.append((p["canonical"], terms))
+    _COMPILED[id(plant_db)] = (plant_db, compiled)
+    return compiled
 
 def near_context(tokens: List[str], idx: int, window: int = 4) -> bool:
     i0 = max(0, idx - window)
@@ -307,40 +338,29 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> tuple:
     Returns ``(plants, negative_plants)`` where both are lists of canonical names.
     ``plants`` includes all non-control plants (positive and negative).
     ``negative_plants`` is the subset flagged as adverse/harmful by keyword context.
-    Instrumented with debug prints.
+    Debug traces are printed when ``PLANTS_DEBUG=1``.
     """
 
     t = norm(text)
     tokens = t.split()
     hits: List[str] = []
 
-    print("---- STEP 1: LEXICAL DETECTION ----")
+    _debug("---- STEP 1: LEXICAL DETECTION ----")
 
-    for p in plant_db:
-        can = p["canonical"]
-        norm_aliases = [norm(a) for a in p["aliases"] if norm(a)]
-
+    for can, terms in _compiled_plants(plant_db):
         found = False
 
-        # Check whether any alias is a Latin binomial (two words)
-        has_binomial = any(
-            re.match(r"^[a-z]+(?:[\s\-_]+)[a-z]+$", a)
-            for a in norm_aliases
-        )
-
         # 1) Latin binomial takes priority
-        if has_binomial:
-            for term in norm_aliases:
-                if re.match(r"^[a-z]+(?:[\s\-_]+)[a-z]+$", term):
-                    if re.search(token_regex(term), t, flags=re.IGNORECASE):
-                        print(term, "      ✔ LATIN BINOMIAL MATCH")
-                        found = True
-                        break
+        for term, pattern, is_binomial in terms:
+            if is_binomial and pattern.search(t):
+                _debug(term, "      ✔ LATIN BINOMIAL MATCH")
+                found = True
+                break
 
         # 2) Common aliases
         if not found:
-            for term in norm_aliases:
-                m = re.search(token_regex(term), t, flags=re.IGNORECASE)
+            for term, pattern, _ in terms:
+                m = pattern.search(t)
                 if not m:
                     continue
 
@@ -350,9 +370,9 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> tuple:
                 if base in AMBIGUOUS or term in AMBIGUOUS:
                     start = m.start()
                     idx = len(norm(t[:start]).split())
-                    print(term, f"      (ambiguous) index={idx}, checking context…")
+                    _debug(term, f"      (ambiguous) index={idx}, checking context…")
                     if near_context(tokens, idx, window=3):
-                        print("      ✔ context found → accepted")
+                        _debug("      ✔ context found → accepted")
                         found = True
                         break
                     else:
@@ -372,23 +392,23 @@ def find_plants_in_text(text: str, plant_db: List[Dict]) -> tuple:
             out.append(h)
             seen.add(h)
 
-    print("\n---- STEP 2: NESTED NAME REMOVAL ----")
-    print("before _filter_nested_plants:", out)
+    _debug("\n---- STEP 2: NESTED NAME REMOVAL ----")
+    _debug("before _filter_nested_plants:", out)
     filtered_nested = _filter_nested_plants(out)
-    print("after  _filter_nested_plants:", filtered_nested)
+    _debug("after  _filter_nested_plants:", filtered_nested)
 
     out = filtered_nested
 
     # 3) Context filter: exclude control/placebo, flag negative plants
     negative: List[str] = []
     if out:
-        print("\n---- STEP 3: CONTEXT FILTER (control excluded / negative flagged) ----")
-        print("before _filter_by_context:", out)
+        _debug("\n---- STEP 3: CONTEXT FILTER (control excluded / negative flagged) ----")
+        _debug("before _filter_by_context:", out)
         out, negative = _filter_by_context(text, out, plant_db)
-        print("after  _filter_by_context — kept:", out, "/ negative:", negative)
+        _debug("after  _filter_by_context — kept:", out, "/ negative:", negative)
     else:
-        print("\n---- STEP 3: (skipped) no plants to filter ----")
+        _debug("\n---- STEP 3: (skipped) no plants to filter ----")
 
-    print("\n==================== END DEBUG find_plants_in_text ====================\n")
+    _debug("\n==================== END DEBUG find_plants_in_text ====================\n")
 
     return out, negative
