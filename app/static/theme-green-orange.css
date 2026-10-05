@@ -787,3 +787,50 @@ footer{
   .app-layout{ grid-template-columns: minmax(0, 1fr); gap: 0; }
   .app-side{ position: static; order: -1; max-height: none; overflow: visible; }
 }
+
+/* ===== Decorative herbarium on the empty home page (removed by the first search) ===== */
+.botanical-grid{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 24px;
+  margin: 28px 0 8px;
+  opacity: 0.6;
+  pointer-events: none;
+  user-select: none;
+}
+.botanical{
+  margin: 0;
+  text-align: center;
+}
+.botanical svg{
+  display: block;
+  width: 100%;
+  max-width: 150px;
+  height: auto;
+  margin: 0 auto;
+}
+.botanical figcaption{
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+  line-height: 1.35;
+  color: var(--primary-dark);
+}
+.botanical figcaption em{ font-family: Georgia, "Times New Roman", serif; font-size: 14px; }
+.botanical figcaption span{
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.botanical .b-line{ fill: none; stroke: var(--primary); stroke-width: 1.3; stroke-linecap: round; }
+.botanical .b-thin{ stroke-width: 0.8; }
+.botanical .b-leaf{ fill: var(--primary-light); stroke: var(--primary); stroke-width: 1.1; stroke-linejoin: round; }
+.botanical .b-vein{ fill: none; stroke: var(--primary); stroke-width: 0.6; opacity: 0.7; }
+.botanical .b-flower{ fill: var(--surface); stroke: var(--primary-dark); stroke-width: 0.8; }
+.botanical .b-heart{ fill: var(--success-border); stroke: var(--primary-dark); stroke-width: 0.8; }
+@media (max-width: 560px){
+  .botanical-grid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
