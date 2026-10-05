@@ -414,6 +414,7 @@
           if (flag === 'NEGATIVE') return `${esc(n)} <span class="plant-flag plant-flag-negative">Negative</span>`;
           if (flag === 'NONE') return `${esc(n)} <span class="plant-flag plant-flag-none">Not proven</span>`;
           if (flag === 'IRRELEVANT') return `${esc(n)} <span class="plant-flag plant-flag-irrelevant">Irrelevant match</span>`;
+          if (flag === 'POSITIVE') return `${esc(n)} <span class="plant-flag plant-flag-relevant">Relevant</span>`;
           return esc(n);
         }).join(', ');
       }
@@ -431,17 +432,23 @@
       }
 
       function applyCardStatusColor(plantCard, currentNames, flags) {
-        // Live updates (right after an Explore click) only ever turn a card red —
-        // a single freshly-explored article isn't enough to declare it green/yellow
-        // with confidence. Green/yellow are shown only once the server recomputes
-        // them from the full persisted history, on the next search/page load.
+        // Live updates (right after an Explore click) turn a card red when every
+        // listed plant is flagged, or green when every listed plant is confirmed
+        // positive. Yellow (mixed) is only shown once the server recomputes it from
+        // the full persisted history, on the next search/page load.
         if (!plantCard) return;
         const knownBad = currentNames.filter(n => ['NEGATIVE', 'NONE', 'IRRELEVANT'].includes(flags[n])).length;
         const allFlagged = currentNames.length > 0 && knownBad === currentNames.length;
+        const allPositive = currentNames.length > 0 && currentNames.every(n => flags[n] === 'POSITIVE');
 
         if (allFlagged) {
           plantCard.classList.remove('mixed-card', 'positive-card');
           markCardNegative(plantCard);
+        } else if (allPositive && !plantCard.classList.contains('negative-card')) {
+          // Never override red: it may come from a toxicity keyword or another
+          // article's negative verdict, which a single positive one doesn't cancel.
+          plantCard.classList.remove('mixed-card');
+          plantCard.classList.add('positive-card');
         }
       }
 

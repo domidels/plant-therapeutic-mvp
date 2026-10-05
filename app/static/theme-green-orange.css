@@ -420,6 +420,11 @@ button.ai-btn:disabled{
   background: var(--surface);
   border: 1px dashed var(--danger);
 }
+.plant-flag-relevant{
+  color: var(--success);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+}
 
 /* Tooltip générique */
 [data-tooltip]{
