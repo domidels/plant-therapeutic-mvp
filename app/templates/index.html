@@ -136,6 +136,7 @@
         <section id="sideLegend" class="side-card" hidden>
           <h2 class="side-title">Legend</h2>
           <p class="card-legend muted"><span class="legend-swatch legend-swatch--positive"></span>Green card: plant with a positive effect on the condition (previously verified)</p>
+          <p class="card-legend muted"><span class="legend-swatch legend-swatch--mixed"></span>Yellow card: at least one of the listed plants has no effect</p>
         </section>
 
         <nav id="yearNav" class="side-card year-nav" aria-label="Jump to year" hidden>
@@ -497,27 +498,32 @@
       }
 
       function applyCardStatusColor(plantCard, currentNames, flags) {
-        // Live updates (right after an Explore click) turn a card red when every
-        // listed plant is flagged, or green when every listed plant is confirmed
-        // positive. Yellow (mixed) is only shown once the server recomputes it from
-        // the full persisted history, on the next search/page load.
+        // Live updates (right after an Explore click) mirror the server's rules in
+        // /recommendations, so the card already shows the color it will have on the
+        // next search. ``flags`` holds the server's verdicts (POSITIVE included) plus
+        // the ones just streamed.
         if (!plantCard) return;
-        const knownBad = currentNames.filter(n => ['NEGATIVE', 'NONE', 'IRRELEVANT'].includes(flags[n])).length;
-        const allFlagged = currentNames.length > 0 && knownBad === currentNames.length;
-        const allPositive = currentNames.length > 0 && currentNames.every(n => flags[n] === 'POSITIVE');
+        const isBad = n => ['NEGATIVE', 'NONE', 'IRRELEVANT'].includes(flags[n]);
+        const allFlagged = currentNames.length > 0 && currentNames.every(isBad);
 
         if (allFlagged) {
-          plantCard.classList.remove('mixed-card', 'positive-card');
           const anyNegative = currentNames.some(n => flags[n] === 'NEGATIVE');
           markCardNegative(plantCard, anyNegative ? 'negative' : 'none');
-        } else if (allPositive && !plantCard.classList.contains('negative-card')) {
-          // Never override red: it may come from a toxicity keyword or another
-          // article's negative verdict, which a single positive one doesn't cancel.
-          // A "No effect" card can turn green once its plants are re-verified positive.
-          plantCard.classList.remove('mixed-card', 'no-effect-card');
-          plantCard.querySelector('.verdict-none')?.remove();
-          plantCard.classList.add('positive-card');
+          return;
         }
+        // Never override red: it may come from a toxicity keyword or another
+        // article's negative verdict, which a single positive one doesn't cancel.
+        if (plantCard.classList.contains('negative-card')) return;
+
+        // IRRELEVANT plants are dropped by the server, so they don't count here.
+        const relevant = currentNames.filter(n => flags[n] !== 'IRRELEVANT');
+        const knownPositive = relevant.filter(n => flags[n] === 'POSITIVE').length;
+        const knownBad = relevant.filter(n => flags[n] === 'NEGATIVE' || flags[n] === 'NONE').length;
+        if (!knownPositive) return;
+
+        plantCard.classList.remove('mixed-card', 'positive-card', 'no-effect-card');
+        plantCard.querySelector('.verdict-none')?.remove();
+        plantCard.classList.add(knownBad > 0 ? 'mixed-card' : 'positive-card');
       }
 
       function renderPlantCard(x) {
@@ -544,7 +550,7 @@
         // badge below — per-plant tags would just repeat the same information. They
         // stay useful (and are shown) only for a mixed card, or right after a live
         // "Explore" click, where they're the only signal of what just happened.
-        const allFlagged = plantNames.length > 0 && plantNames.every(n => plantFlags[n]);
+        const allFlagged = plantNames.length > 0 && plantNames.every(n => plantFlags[n] === 'NEGATIVE' || plantFlags[n] === 'NONE');
         const displayFlags = allFlagged ? {} : plantFlags;
 
         const statusClass = { red: ' negative-card', yellow: ' mixed-card', green: ' positive-card' }[x.status_color] || '';

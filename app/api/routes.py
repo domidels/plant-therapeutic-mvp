@@ -949,14 +949,19 @@ async def recommendations(
 
     # Plants confirmed IRRELEVANT (the name doesn't actually refer to the plant in a
     # given article — e.g. "Cinnamon" as part of the "Cinnamon/Nagoya" mouse strain
-    # name) are dropped from future results entirely — unlike a negative/no-effect
+    # name) are dropped from future results entirely — unlike a negative
     # finding, they carry no information worth showing.
     IRRELEVANT_CODE = 3
+    NONE_CODE = 2
     filtered_results: List[Dict[str, Any]] = []
     for r in results:
         names = [p.strip() for p in r["plant"].split(",") if p.strip()]
         relevant_names = [n for n in names if plant_verdicts.get(n.lower()) != IRRELEVANT_CODE]
         if not relevant_names:
+            continue
+        # Plants all confirmed to have no effect (NONE) on this condition are dropped
+        # too: the card would only say "nothing here". Negative ones stay, as a warning.
+        if all(plant_verdicts.get(n.lower()) == NONE_CODE for n in relevant_names):
             continue
         r["plant"] = ", ".join(relevant_names)
 
@@ -972,9 +977,12 @@ async def recommendations(
                 flags[n] = "NONE"
                 known_bad += 1
             elif v == 0:
+                # Sent too, so live recoloring after an Explore click can apply the
+                # same green/yellow rules as below without losing earlier verdicts.
+                flags[n] = "POSITIVE"
                 known_positive += 1
         r["plant_flags"] = flags
-        r["_all_flagged"] = bool(relevant_names) and len(flags) == len(relevant_names)
+        r["_all_flagged"] = bool(relevant_names) and known_bad == len(relevant_names)
         r["_known_positive"] = known_positive
         r["_known_bad"] = known_bad
         filtered_results.append(r)
@@ -1002,7 +1010,7 @@ async def recommendations(
 
         # Which red badge to show: "none" (no effect shown) only when every flagged
         # plant is NONE and no toxicity keyword fired; anything else is "negative".
-        flag_values = set(r["plant_flags"].values())
+        flag_values = {v for v in r["plant_flags"].values() if v != "POSITIVE"}
         if not r["has_negative"]:
             r["negative_kind"] = None
         elif not keyword_negative and flag_values == {"NONE"}:
@@ -1054,7 +1062,6 @@ async def explore_stream(
 
         async def gen_cached():
             yield cached_text
-            yield f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
             verdict_label = "NEGATIVE" if cached_verdict == 1 else "POSITIVE"
             yield f"\n__VERDICT:{verdict_label}__"
 
@@ -1089,7 +1096,6 @@ async def explore_stream(
     if not arts:
         async def gen_empty():
             yield "No abstract found.\n"
-            yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         return StreamingResponse(gen_empty(), media_type="text/plain")
 
     a = arts[0]
@@ -1105,7 +1111,6 @@ async def explore_stream(
     if not chunks:
         async def gen_no_abs():
             yield "No abstract text available.\n"
-            yield f"References:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
         return StreamingResponse(gen_no_abs(), media_type="text/plain")
 
     # Build context and token estimate
@@ -1258,9 +1263,6 @@ async def explore_stream(
 
         if pending and not _is_marker_line(pending):
             yield pending
-
-        refs = f"\n\nReferences:\nPubMed: https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-        yield refs
 
         full_resume = "".join(buf_parts).strip()
 

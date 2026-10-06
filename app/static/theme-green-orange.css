@@ -712,6 +712,11 @@ footer{
   border-radius: 4px;
   flex: none;
 }
+.legend-swatch--mixed{
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  border-left: 3px solid var(--warning);
+}
 .legend-swatch--positive{
   background: var(--success-bg);
   border: 1px solid var(--success-border);
@@ -756,6 +761,7 @@ footer{
 .side-card input#cond{ box-sizing: border-box; }
 .side-card .search-hint{ margin: 10px 0 0; }
 .side-card .card-legend{ margin: 0; align-items: flex-start; }
+.side-card .card-legend + .card-legend{ margin-top: 8px; }
 .side-card .legend-swatch{ margin-top: 3px; }
 .side-card .row-actions select#fromYear{ flex: 1; width: auto; }
 
