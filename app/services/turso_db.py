@@ -8,12 +8,14 @@ Schema overview
 - ``pub_resume``             : LLM-generated article summaries (cache).
 - ``condition``              : Search counter per corrected condition name.
 - ``condition_misspellings`` : Cache mapping raw user input -> corrected condition.
+- ``condition_synonyms``     : Cache mapping corrected condition -> PubMed search synonyms.
 - ``usage_daily``            : Per-identity daily quota counters.
                                ``user_id`` is either a hashed client IP or the
                                reserved key ``_global`` for the service-wide ceiling.
 """
 from __future__ import annotations
 import datetime
+import json
 import os
 from typing import Optional, Sequence, Any
 from libsql_client import create_client
@@ -59,6 +61,7 @@ async def init_db() -> None:
 
     Safe to call multiple times (idempotent ``CREATE … IF NOT EXISTS``).
     Tables created: ``pub_resume``, ``condition``, ``condition_misspellings``,
+    ``condition_synonyms``,
     ``usage_daily``.
     """
     # --- pub_resume (cache summaries) ---
@@ -115,6 +118,18 @@ async def init_db() -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_condition_misspellings_condition
           ON condition_misspellings(condition);
+        """
+    )
+
+    # --- condition_synonyms (corrected condition -> search synonyms, JSON list) ---
+    await db_execute(
+        """
+        CREATE TABLE IF NOT EXISTS condition_synonyms (
+          condition TEXT PRIMARY KEY,
+          synonyms TEXT NOT NULL,          -- JSON array of lowercase terms
+          source TEXT NOT NULL,            -- 'mesh' or 'llm'
+          inserted_date TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        );
         """
     )
 
@@ -194,6 +209,34 @@ async def increment_searched(pub_id: str) -> None:
     await db_execute(
         "UPDATE pub_resume SET searched = COALESCE(searched, 0) + 1 WHERE pub_id = ?;",
         (pub_id,),
+    )
+
+
+async def get_condition_synonyms(condition: str) -> Optional[list[str]]:
+    """Return the cached search synonyms for ``condition``, or None on cache miss."""
+    row = await db_fetchone(
+        "SELECT synonyms FROM condition_synonyms WHERE condition = ?;", (condition,)
+    )
+    if not row:
+        return None
+    try:
+        value = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    return [str(s) for s in value] if isinstance(value, list) else None
+
+
+async def upsert_condition_synonyms(condition: str, synonyms: list[str], source: str) -> None:
+    """Cache the search synonyms resolved for ``condition`` (``source``: 'mesh' or 'llm')."""
+    await db_execute(
+        """
+        INSERT INTO condition_synonyms(condition, synonyms, source)
+        VALUES (?, ?, ?)
+        ON CONFLICT(condition) DO UPDATE
+        SET synonyms = excluded.synonyms, source = excluded.source,
+            inserted_date = CURRENT_TIMESTAMP;
+        """,
+        (condition, json.dumps(synonyms), source),
     )
 
 

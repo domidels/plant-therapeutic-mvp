@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from app.core.config import settings
 from app.services.medline import get_medlineplus_fullsummary
+from app.services.mesh import MeshCandidate, mesh_candidates
 from app.services.plants_v2 import find_plants_in_text, load_plants
 from app.services.pubmed import efetch, search_and_fetch
 from app.services.ranking import score_article, summarize_for_patients
@@ -45,6 +46,8 @@ from app.services.turso_db import (
     get_negative_pub_ids,
     get_plant_verdicts_for_condition,
     upsert_plant_verdict,
+    get_condition_synonyms,
+    upsert_condition_synonyms,
     # generic db helpers
     db_fetchone,
     db_execute,
@@ -563,6 +566,110 @@ async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str], bool]:
     return corrected, synonyms, is_condition
 
 
+MAX_SEARCH_SYNONYMS = 4  # extra terms OR-ed with the corrected condition in PubMed
+
+
+async def _select_synonyms_with_llm(cond: str, candidates: List[MeshCandidate]) -> List[str]:
+    """
+    Let the LLM pick, from a closed list of MeSH candidates, the terms whose studies
+    count as evidence for ``cond``. Picking from a fixed list is far more stable than
+    free generation, and answers outside the list are ignored. The main descriptor
+    (MeSH files ``cond`` under it) is always kept and not submitted to the LLM.
+    """
+    main = [c.name for c in candidates if c.is_main]
+    others = [c for c in candidates if not c.is_main]
+    if not others:
+        return main[:MAX_SEARCH_SYNONYMS]
+    listing = "\n".join(f"- {c.name} ({c.count} articles)" for c in others)
+    system = (
+        "You are a medical terminology assistant helping build a PubMed search.\n"
+        "Given a condition and a list of candidate MeSH terms, keep ONLY the candidates that "
+        "name the same condition, a synonym of it, or one of its main forms that clinical "
+        "studies commonly use for it (e.g. for 'eczema': 'atopic dermatitis'; for 'anxiety': "
+        "'anxiety disorders', 'generalized anxiety disorder').\n"
+        "Reject distinct diseases, rare genetic syndromes, conditions that merely share a word, "
+        "and situational or niche variants that a patient searching this condition would not mean.\n"
+        "Answer with EXACTLY ONE LINE: KEEP: <term1>, <term2>, ... copied verbatim from the list, "
+        "or KEEP: (none). No other text."
+    )
+    user = f"Condition: {cond}\nCandidates:\n{listing}"
+    raw = await _llm_chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=120,
+        temperature=0.0,
+    )
+    allowed = {c.name for c in others}
+    kept: List[str] = list(main)
+    for line in _clean_text(raw).splitlines():
+        if line.strip().upper().startswith("KEEP:"):
+            for t in line.split(":", 1)[1].split(","):
+                t = normalize_condition(t)
+                if t in allowed and t not in kept:
+                    kept.append(t)
+    # Most productive first (candidates are already sorted by PubMed count)
+    order = [c.name for c in candidates]
+    return sorted(kept, key=order.index)[:MAX_SEARCH_SYNONYMS]
+
+
+async def resolve_synonyms(cond: str, llm_synonyms: Optional[List[str]] = None) -> Tuple[List[str], bool]:
+    """
+    Return ``(synonyms, used_llm)`` for a corrected condition, cache-first.
+
+    1. Turso cache (``condition_synonyms``) — no LLM, no NCBI call.
+    2. MeSH candidates (deterministic) filtered by the LLM from that closed list.
+    3. Fallback when MeSH has nothing (lay wording, rare terms): the LLM's own
+       synonyms, from the correction call when available.
+    The result is cached unless an upstream call failed, so a transient error never
+    freezes a degraded synonym list.
+    """
+    try:
+        cached = await get_condition_synonyms(cond)
+    except Exception as e:
+        print(f"[synonyms] cache read failed: {type(e).__name__}: {e}")
+        cached = None
+    if cached is not None:
+        return cached, False
+
+    used_llm = False
+    cacheable = True
+    synonyms: List[str] = []
+    source = "mesh"
+    try:
+        candidates = await mesh_candidates(cond)
+    except Exception as e:
+        print(f"[synonyms] MeSH lookup failed: {type(e).__name__}: {e}")
+        candidates, cacheable = [], False
+
+    if candidates:
+        try:
+            synonyms = await _select_synonyms_with_llm(cond, candidates)
+            used_llm = True
+        except Exception as e:
+            print(f"[synonyms] LLM selection failed: {type(e).__name__}: {e}")
+            # Still use the main descriptor (safe without LLM), but don't cache.
+            synonyms = [c.name for c in candidates if c.is_main]
+            cacheable = False
+
+    if not synonyms:
+        source = "llm"
+        if llm_synonyms is None:
+            try:
+                _, llm_synonyms, _ = await _expand_condition_with_llm(cond)
+                used_llm = True
+            except Exception as e:
+                print(f"[synonyms] LLM fallback failed: {type(e).__name__}: {e}")
+                llm_synonyms, cacheable = [], False
+        synonyms = [normalize_condition(x) for x in llm_synonyms if normalize_condition(x) != cond]
+        synonyms = synonyms[:MAX_SEARCH_SYNONYMS]
+
+    if cacheable:
+        try:
+            await upsert_condition_synonyms(cond, synonyms, source)
+        except Exception as e:
+            print(f"[synonyms] cache write failed: {type(e).__name__}: {e}")
+    return synonyms, used_llm
+
+
 async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, bool]:
     """
     Resolve a raw condition string to its corrected canonical form.
@@ -592,18 +699,15 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     synonyms: List[str] = []
     is_condition = True
 
+    llm_synonyms: Optional[List[str]] = None
+
     if row and row[0]:
-        # Condition already known — use cached correction, still fetch synonyms via LLM
+        # Condition already known — cached correction; synonyms resolved below (cache-first)
         corrected_norm = normalize_condition(row[0])
-        try:
-            _, synonyms, is_condition = await _expand_condition_with_llm(corrected_norm)
-            used_llm = True
-        except Exception:
-            synonyms = []
     else:
         # 2) LLM fallback for both correction and synonyms
         try:
-            corrected, synonyms, is_condition = await _expand_condition_with_llm(raw_norm)
+            corrected, llm_synonyms, is_condition = await _expand_condition_with_llm(raw_norm)
             corrected_norm = normalize_condition(corrected) or raw_norm
             used_llm = True
         except Exception as e:
@@ -615,6 +719,9 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     # Skip DB writes if input is not a medical condition
     if not is_condition:
         return corrected_norm, corrected_norm, used_llm, synonyms, is_condition
+
+    synonyms, synonyms_used_llm = await resolve_synonyms(corrected_norm, llm_synonyms)
+    used_llm = used_llm or synonyms_used_llm
 
     # 3) increment corrected condition counter
     try:
@@ -696,8 +803,8 @@ async def condition_query(
         await enforce_global_quota(add_hf_tokens=est)
         await enforce_quota(user_id, add_hf_tokens=est, add_turso_ops=1)
 
-    # Build expanded search query including synonyms (max 3 extra terms)
-    all_terms = [corrected] + [s for s in synonyms[:3] if s.lower() != corrected.lower()]
+    # Build expanded search query including synonyms (max MAX_SEARCH_SYNONYMS extra terms)
+    all_terms = [corrected] + [s for s in synonyms[:MAX_SEARCH_SYNONYMS] if s.lower() != corrected.lower()]
     search_query = " OR ".join(all_terms)
 
     medline_html = ""
