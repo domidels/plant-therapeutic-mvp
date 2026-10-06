@@ -43,9 +43,8 @@ from app.services.turso_db import (
     get_resume_by_pub_id,
     increment_searched,
     insert_resume,
-    get_negative_pub_ids,
     get_plant_verdicts_for_condition,
-    upsert_plant_verdict,
+    upsert_plant_article_verdict,
     get_condition_synonyms,
     upsert_condition_synonyms,
     # generic db helpers
@@ -860,6 +859,10 @@ def _pub_cache_id(pmid: str, plant: str, condition: str) -> str:
     return f"pub_{pmid}::{plant_key}::{condition_key}"
 
 
+# plant_condition_verdict / plant_article_verdict codes ↔ stream status words
+_VERDICT_WORDS = {0: "POSITIVE", 1: "NEGATIVE", 2: "NONE", 3: "IRRELEVANT"}
+
+
 @router.get("/recommendations")
 async def recommendations(
     condition: str = Query(..., min_length=2),
@@ -988,25 +991,14 @@ async def recommendations(
         filtered_results.append(r)
     results = filtered_results
 
-    # Enrich results with cached verdict — single batch query.
-    # Keys are scoped per (pmid, plant, condition): see _pub_cache_id.
-    all_pub_ids = [
-        _pub_cache_id(s["pmid"], r["plant"], condition)
-        for r in results for s in r["top_studies"] if s.get("pmid")
-    ]
-    try:
-        negative_ids = await get_negative_pub_ids(all_pub_ids)
-    except Exception:
-        negative_ids = set()
+    # Card colors come only from per-plant verdicts (aggregated over every explored
+    # article, see turso_db.aggregate_plant_verdict) and toxicity keywords. The
+    # per-article pub_resume.verdict is not used: it lumps "no effect" with "negative".
     for r in results:
-        llm_negative = any(
-            _pub_cache_id(s["pmid"], r["plant"], condition) in negative_ids
-            for s in r["top_studies"]
-        )
         known_positive = r.pop("_known_positive", 0)
         known_bad = r.pop("_known_bad", 0)
         keyword_negative = r.pop("keyword_negative", False)
-        r["has_negative"] = llm_negative or keyword_negative or r.pop("_all_flagged", False)
+        r["has_negative"] = keyword_negative or r.pop("_all_flagged", False)
 
         # Which red badge to show: "none" (no effect shown) only when every flagged
         # plant is NONE and no toxicity keyword fired; anything else is "negative".
@@ -1065,17 +1057,17 @@ async def explore_stream(
             verdict_label = "NEGATIVE" if cached_verdict == 1 else "POSITIVE"
             yield f"\n__VERDICT:{verdict_label}__"
 
-            # Re-derive per-plant status from the persisted verdict table so the UI can
-            # still flag negative/unproven plants in red on a cache hit.
+            # Per-plant status from the aggregated verdict table (all articles), the
+            # same values /recommendations colors cards with on the next search.
             if parts_pl and raw_condition:
                 try:
                     verdict_map = await get_plant_verdicts_for_condition(raw_condition)
                 except Exception:
                     verdict_map = {}
                 for p in parts_pl:
-                    code = verdict_map.get(p.lower())
-                    status = {1: "NEGATIVE", 2: "NONE", 3: "IRRELEVANT"}.get(code, "POSITIVE")
-                    yield f"\n__PLANT_STATUS:{p}={status}__"
+                    status = _VERDICT_WORDS.get(verdict_map.get(p.lower()))
+                    if status:  # plants never verified get no status
+                        yield f"\n__PLANT_STATUS:{p}={status}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
@@ -1299,23 +1291,29 @@ async def explore_stream(
         verdict_int = 1 if verdict == "NEGATIVE" else 0
         yield f"\n__VERDICT:{verdict}__"
 
-        verdict_code = {"POSITIVE": 0, "NEGATIVE": 1, "NONE": 2, "IRRELEVANT": 3}
+        verdict_code = {word: code for code, word in _VERDICT_WORDS.items()}
 
-        for p in parts_pl:
-            word = plant_verdicts.get(p.lower())
-            if not word:
-                continue
-            yield f"\n__PLANT_STATUS:{p}={word}__"
-
+        # Store this article's verdict per plant, then report each plant's verdict
+        # aggregated over all its articles — what the next search will color with.
+        verdict_map: Dict[str, int] = {}
         if raw_condition:
             for p in parts_pl:
                 word = plant_verdicts.get(p.lower())
                 if not word:
                     continue
                 try:
-                    await upsert_plant_verdict(raw_condition, p, verdict_code[word])
+                    await upsert_plant_article_verdict(raw_condition, p, pmid, verdict_code[word])
                 except Exception as e:
                     print(f"[turso] plant verdict upsert failed: {type(e).__name__}: {e}")
+            try:
+                verdict_map = await get_plant_verdicts_for_condition(raw_condition)
+            except Exception as e:
+                print(f"[turso] plant verdict read failed: {type(e).__name__}: {e}")
+
+        for p in parts_pl:
+            status = _VERDICT_WORDS.get(verdict_map.get(p.lower())) or plant_verdicts.get(p.lower())
+            if status:
+                yield f"\n__PLANT_STATUS:{p}={status}__"
 
         if clean_resume:
             try:

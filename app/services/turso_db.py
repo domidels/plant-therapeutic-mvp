@@ -187,6 +187,20 @@ async def init_db() -> None:
         );
     """)
 
+    # --- plant_article_verdict (one LLM verdict per article, plant and condition) ---
+    # plant_condition_verdict is derived from these rows (see aggregate_plant_verdict)
+    # so a single article no longer overwrites what earlier articles showed.
+    await db_execute("""
+        CREATE TABLE IF NOT EXISTS plant_article_verdict (
+            condition  TEXT NOT NULL,
+            plant      TEXT NOT NULL,
+            pmid       TEXT NOT NULL,   -- 'legacy' for verdicts migrated without an article
+            verdict    INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            PRIMARY KEY (condition, plant, pmid)
+        );
+    """)
+
 
 # ---------------------------------------------------------------------
 # pub_resume functions
@@ -275,11 +289,11 @@ async def get_plant_verdicts_for_condition(condition: str) -> dict[str, int]:
 
 
 async def upsert_plant_verdict(condition: str, plant: str, verdict: int) -> None:
-    """Persist whether ``plant`` has a positive (0), negative/adverse (1), or no
-    meaningful (2) effect on ``condition``.
+    """Persist the aggregated verdict of ``plant`` on ``condition``: positive (0),
+    negative/adverse (1), no meaningful effect (2) or irrelevant (3).
 
-    Last-verified-wins: a later explanation for the same (condition, plant) overwrites
-    the previous verdict.
+    Called by ``upsert_plant_article_verdict`` with the aggregate of all the plant's
+    article verdicts — not meant to be called with a single article's verdict.
     """
     condition_key = (condition or "").strip().lower()
     plant_key = (plant or "").strip().lower()
@@ -295,6 +309,53 @@ async def upsert_plant_verdict(condition: str, plant: str, verdict: int) -> None
         """,
         (condition_key, plant_key, verdict),
     )
+
+
+# Verdict codes shared by plant_article_verdict and plant_condition_verdict.
+VERDICT_POSITIVE, VERDICT_NEGATIVE, VERDICT_NONE, VERDICT_IRRELEVANT = 0, 1, 2, 3
+
+
+def aggregate_plant_verdict(article_verdicts: list[int]) -> Optional[int]:
+    """Combine a plant's per-article verdicts for one condition into one verdict.
+
+    - NEGATIVE if any article shows an adverse effect (safety first);
+    - else POSITIVE if any article shows a positive effect;
+    - else NONE if any article shows no meaningful effect;
+    - else IRRELEVANT — only when *every* article misdetected the plant's name.
+    """
+    for code in (VERDICT_NEGATIVE, VERDICT_POSITIVE, VERDICT_NONE, VERDICT_IRRELEVANT):
+        if code in article_verdicts:
+            return code
+    return None
+
+
+async def upsert_plant_article_verdict(condition: str, plant: str, pmid: str, verdict: int) -> None:
+    """Persist one article's verdict for ``plant`` on ``condition`` and refresh the
+    plant's aggregated verdict in ``plant_condition_verdict``."""
+    condition_key = (condition or "").strip().lower()
+    plant_key = (plant or "").strip().lower()
+    pmid_key = (pmid or "").strip()
+    if not condition_key or not plant_key or not pmid_key:
+        return
+    _check_cfg()
+    async with create_client(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as db:
+        await db.execute(
+            """
+            INSERT INTO plant_article_verdict (condition, plant, pmid, verdict, updated_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(condition, plant, pmid) DO UPDATE SET
+                verdict = excluded.verdict,
+                updated_at = CURRENT_TIMESTAMP;
+            """,
+            (condition_key, plant_key, pmid_key, verdict),
+        )
+        rs = await db.execute(
+            "SELECT verdict FROM plant_article_verdict WHERE condition = ? AND plant = ?;",
+            (condition_key, plant_key),
+        )
+    aggregated = aggregate_plant_verdict([row[0] for row in (rs.rows or [])])
+    if aggregated is not None:
+        await upsert_plant_verdict(condition_key, plant_key, aggregated)
 
 
 async def insert_resume(pub_id: str, resume: str, verdict: Optional[int] = None) -> None:
