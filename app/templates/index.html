@@ -136,7 +136,8 @@
         <section id="sideLegend" class="side-card" hidden>
           <h2 class="side-title">Legend</h2>
           <p class="card-legend muted"><span class="legend-swatch legend-swatch--positive"></span>Green card: plant with a positive effect on the condition (previously verified)</p>
-          <p class="card-legend muted"><span class="legend-swatch legend-swatch--mixed"></span>Yellow card: at least one of the listed plants has no effect</p>
+          <p class="card-legend muted"><span class="legend-swatch legend-swatch--mixed"></span>Yellow card: at least one of the listed plants has a positive effect</p>
+          <p class="card-legend muted"><span class="legend-swatch legend-swatch--none"></span>Orange card: none of the listed plants has an effect — hidden on the next search</p>
         </section>
 
         <nav id="yearNav" class="side-card year-nav" aria-label="Jump to year" hidden>
@@ -481,7 +482,7 @@
         return '<span class="verdict-negative">🛑 Negative effect</span>';
       }
 
-      // kind "negative" → red card; kind "none" → pale yellow card.
+      // kind "negative" → red card; kind "none" → orange card.
       function markCardNegative(plantCard, kind = 'negative') {
         if (!plantCard) return;
         // Never downgrade a "Negative effect" card to "No effect".

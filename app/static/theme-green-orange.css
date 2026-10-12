@@ -23,8 +23,9 @@
   --warning: #8a6d1a;
   --warning-bg: #fdf3d9;
   --warning-border: #f0dfa8;
-  --no-effect-bg: #fffbea;     /* pale pastel yellow for "No effect" cards */
-  --no-effect-border: #f5ecc4;
+  --no-effect: #c2620a;        /* orange accent for "No effect" cards */
+  --no-effect-bg: #fdeedd;     /* pale orange for "No effect" cards */
+  --no-effect-border: #f3cfa6;
 
   /* Positif confirmé (toutes les plantes) — vert sobre, teinte de l'accent */
   --success: var(--primary-dark);
@@ -382,12 +383,12 @@ button.ai-btn:disabled{
   border-left: 3px solid var(--warning);
 }
 
-/* No effect shown for this condition — pale pastel yellow, lighter than mixed-card */
+/* No effect shown for any listed plant — orange; the card is hidden on the next search */
 .card.no-effect-card,
 .card.no-effect-card:hover {
   background: var(--no-effect-bg) !important;
   border-color: var(--no-effect-border) !important;
-  border-left: 3px solid var(--warning-border);
+  border-left: 3px solid var(--no-effect);
 }
 
 /* All plants confirmed positive for this condition */
@@ -404,8 +405,8 @@ button.ai-btn:disabled{
   font-size: 0.85em;
 }
 .verdict-negative{ margin-left: 4px; }
-/* "No effect" badge: amber exclamation mark instead of the red stop sign */
-.verdict-none{ color: var(--warning); }
+/* "No effect" badge: orange exclamation mark instead of the red stop sign */
+.verdict-none{ color: var(--no-effect); }
 .verdict-icon{
   display: inline-flex;
   align-items: center;
@@ -414,7 +415,7 @@ button.ai-btn:disabled{
   height: 1.15em;
   margin-right: 4px;
   border-radius: 50%;
-  background: var(--warning);
+  background: var(--no-effect);
   color: #fff;
   font-weight: 800;
   font-size: 0.9em;
@@ -716,6 +717,11 @@ footer{
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
   border-left: 3px solid var(--warning);
+}
+.legend-swatch--none{
+  background: var(--no-effect-bg);
+  border: 1px solid var(--no-effect-border);
+  border-left: 3px solid var(--no-effect);
 }
 .legend-swatch--positive{
   background: var(--success-bg);
