@@ -23,9 +23,11 @@ import os
 import re
 import time
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -275,34 +277,86 @@ async def auth_me(request: Request, _: None = Depends(require_human)):
 
 
 # ---------------------------------------------------------------------
-# Hugging Face Inference API config
+# LLM providers config (OpenAI-compatible chat-completions APIs)
 # ---------------------------------------------------------------------
-HF_TOKEN = (getattr(settings, "HF_TOKEN", None) or os.getenv("HF_TOKEN", "")).strip()
-HF_BASE_URL = "https://router.huggingface.co/v1"
-HF_MODEL = os.getenv("HF_MODEL", "meta-llama/Llama-3.1-8B-Instruct").strip()
+@dataclass(frozen=True)
+class _LLMProvider:
+    """One OpenAI-compatible chat-completions endpoint."""
 
-_HF_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
-_HF_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
+    base_url: str
+    api_key: str
+    model: str
+
+    @property
+    def name(self) -> str:
+        """Short label for logs and alerts, e.g. ``api.mistral.ai``."""
+        return urlparse(self.base_url).netloc or self.base_url
+
+
+def _load_llm_providers() -> List[_LLMProvider]:
+    """
+    Return the configured providers, in the order they are tried.
+
+    ``LLM_*`` is the main provider and ``LLM_FALLBACK_*`` the optional fallback.
+    When neither is set, fall back to the legacy Hugging Face config (``HF_TOKEN``).
+    """
+    providers: List[_LLMProvider] = []
+    for prefix in ("LLM", "LLM_FALLBACK"):
+        key = os.getenv(f"{prefix}_API_KEY", "").strip()
+        base_url = os.getenv(f"{prefix}_BASE_URL", "").strip().rstrip("/")
+        model = os.getenv(f"{prefix}_MODEL", "").strip()
+        if key and base_url and model:
+            providers.append(_LLMProvider(base_url=base_url, api_key=key, model=model))
+
+    hf_token = (getattr(settings, "HF_TOKEN", None) or os.getenv("HF_TOKEN", "")).strip()
+    if not providers and hf_token:
+        providers.append(
+            _LLMProvider(
+                base_url="https://router.huggingface.co/v1",
+                api_key=hf_token,
+                model=os.getenv("HF_MODEL", "meta-llama/Llama-3.1-8B-Instruct").strip(),
+            )
+        )
+    return providers
+
+
+LLM_PROVIDERS = _load_llm_providers()
+
+# Status codes worth retrying on the next provider: quota/credit exhausted,
+# rate-limited, or provider-side failure.
+_FALLBACK_STATUSES = {402, 429}
+# Status codes meaning the free quota/credit is exhausted — these trigger an email alert.
+_QUOTA_STATUSES = {402, 429}
+# Extra max_tokens granted to reasoning models (gpt-oss) for their hidden reasoning.
+_REASONING_TOKEN_BUDGET = 512
+
+_LLM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
+_LLM_STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=60.0, pool=10.0)
 _LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
 _TRANSPORT = httpx.AsyncHTTPTransport(http2=False)
 
-# Alert email — sent once per calendar month when HF quota is exhausted (HTTP 402)
+# Alert email — sent at most once per provider per UTC day when its quota is exhausted
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
 EMAIL_FROM = os.getenv("EMAIL_FROM", "Plant-Med <no-reply@plant-med.org>").strip()
 ALERT_EMAIL = os.getenv("ALERT_EMAIL", "").strip()
-_hf_quota_alerted_month: Optional[str] = None  # "YYYY-MM" of last alert sent
+_llm_quota_alerted: Dict[str, str] = {}  # provider name -> "YYYY-MM-DD" of last alert sent
 
 
-async def _send_hf_quota_alert() -> None:
-    """Send a one-time email alert when the HuggingFace monthly credit is exhausted."""
-    global _hf_quota_alerted_month
-    current_month = datetime.utcnow().strftime("%Y-%m")
-    if _hf_quota_alerted_month == current_month:
-        return  # already sent this month
+async def _send_llm_quota_alert(provider: _LLMProvider, status_code: int) -> None:
+    """Send a one-time-per-day email alert when an LLM provider's free quota is exhausted."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if _llm_quota_alerted.get(provider.name) == today:
+        return  # already sent today for this provider
     if not RESEND_API_KEY or not ALERT_EMAIL:
         print("[alert] RESEND_API_KEY or ALERT_EMAIL not configured — skipping email alert")
         return
-    _hf_quota_alerted_month = current_month
+    _llm_quota_alerted[provider.name] = today
+    others = [p.name for p in LLM_PROVIDERS if p != provider]
+    fallback_note = (
+        f"Requests now go to the fallback provider ({', '.join(others)}) while available.\n"
+        if others
+        else "No fallback provider is configured: LLM summaries are unavailable until the quota resets.\n"
+    )
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
@@ -311,19 +365,19 @@ async def _send_hf_quota_alert() -> None:
                 json={
                     "from": EMAIL_FROM,
                     "to": [ALERT_EMAIL],
-                    "subject": f"[Plant-Med] HuggingFace quota exhausted — {current_month}",
+                    "subject": f"[Plant-Med] LLM quota exhausted on {provider.name} — {today}",
                     "text": (
-                        f"The HuggingFace free-tier monthly credit has been exhausted ({current_month}).\n\n"
-                        f"Model in use: {HF_MODEL}\n"
-                        "LLM summaries are no longer available until the credit resets next month "
-                        "or until you upgrade your HuggingFace plan.\n\n"
+                        f"The LLM provider {provider.name} answered HTTP {status_code} "
+                        f"(quota exhausted or rate-limited) on {today}.\n\n"
+                        f"Model in use: {provider.model}\n"
+                        f"{fallback_note}\n"
                         "— Plant-Med alert"
                     ),
                 },
             )
-        print(f"[alert] HF quota alert sent to {ALERT_EMAIL}")
+        print(f"[alert] LLM quota alert for {provider.name} sent to {ALERT_EMAIL}")
     except Exception as e:
-        print(f"[alert] Failed to send HF quota alert: {e}")
+        print(f"[alert] Failed to send LLM quota alert: {e}")
 
 
 def _clean_text(s: str) -> str:
@@ -331,30 +385,78 @@ def _clean_text(s: str) -> str:
     return "".join(ch for ch in s if ch in ("\n", "\t") or ord(ch) >= 32)
 
 
+def _require_llm_providers() -> List[_LLMProvider]:
+    """Return the configured providers, or raise when none is configured."""
+    if not LLM_PROVIDERS:
+        raise RuntimeError("No LLM provider configured (set LLM_API_KEY, LLM_BASE_URL and LLM_MODEL)")
+    return LLM_PROVIDERS
+
+
+def _llm_request(
+    provider: _LLMProvider,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    stream: bool,
+) -> Tuple[Dict[str, str], Dict[str, Any]]:
+    """Build the ``(headers, payload)`` of a chat-completion request for ``provider``."""
+    payload: Dict[str, Any] = {
+        "model": provider.model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": stream,
+    }
+    if "gpt-oss" in provider.model:
+        # Reasoning model: its hidden reasoning tokens count against max_tokens,
+        # so keep the reasoning short and leave room for the visible answer.
+        payload["reasoning_effort"] = "low"
+        payload["max_tokens"] = max_tokens + _REASONING_TOKEN_BUDGET
+    headers = {"Authorization": f"Bearer {provider.api_key}", "Content-Type": "application/json"}
+    return headers, payload
+
+
+
+def _should_fall_back(e: Exception) -> bool:
+    """True when the error is worth retrying on the next provider."""
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        return code in _FALLBACK_STATUSES or code >= 500 or code in (401, 403)
+    return isinstance(e, httpx.TransportError)
+
+
+def _on_llm_status(provider: _LLMProvider, status_code: int) -> None:
+    """Fire the quota alert when ``status_code`` means the provider's quota is exhausted."""
+    if status_code in _QUOTA_STATUSES:
+        asyncio.create_task(_send_llm_quota_alert(provider, status_code))
+
+
 async def _llm_chat(
     messages: List[Dict[str, str]],
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> str:
-    """Send a blocking chat-completion request to Hugging Face and return the text response."""
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN missing")
+    """
+    Send a blocking chat-completion request and return the text response.
 
-    payload = {
-        "model": HF_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
-    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=_HF_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
-        r = await client.post(f"{HF_BASE_URL}/chat/completions", headers=headers, json=payload)
-        if r.status_code == 402:
-            asyncio.create_task(_send_hf_quota_alert())
-        r.raise_for_status()
-        js = r.json()
+    Providers are tried in order: on a quota, rate-limit, auth, server or network
+    error, the same request goes to the next one.
+    """
+    providers = _require_llm_providers()
+    js: Dict[str, Any] = {}
+    for i, provider in enumerate(providers):
+        headers, payload = _llm_request(provider, messages, max_tokens, temperature, stream=False)
+        try:
+            async with httpx.AsyncClient(timeout=_LLM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
+                r = await client.post(f"{provider.base_url}/chat/completions", headers=headers, json=payload)
+                _on_llm_status(provider, r.status_code)
+                r.raise_for_status()
+                js = r.json()
+            break
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            if i == len(providers) - 1 or not _should_fall_back(e):
+                raise
+            print(f"[llm] {provider.name} failed ({type(e).__name__}: {e}); falling back to {providers[i + 1].name}")
 
     choices = js.get("choices") or []
     if choices:
@@ -369,53 +471,57 @@ async def _llm_chat_stream(
     max_tokens: int = 300,
     temperature: float = 0.2,
 ) -> AsyncIterator[str]:
-    """Stream chat-completion tokens from Hugging Face, yielding each text chunk as it arrives."""
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN missing")
+    """
+    Stream chat-completion tokens, yielding each text chunk as it arrives.
 
-    payload = {
-        "model": HF_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "stream": True,
-    }
-    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+    Providers are tried in order, like ``_llm_chat``, but only until the first
+    chunk is yielded: once text has reached the client, an error is raised
+    instead of mixing two answers.
+    """
+    providers = _require_llm_providers()
+    for i, provider in enumerate(providers):
+        headers, payload = _llm_request(provider, messages, max_tokens, temperature, stream=True)
+        started = False
+        try:
+            async with httpx.AsyncClient(timeout=_LLM_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
+                async with client.stream(
+                    "POST",
+                    f"{provider.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as r:
+                    _on_llm_status(provider, r.status_code)
+                    if r.status_code >= 400:
+                        raw = await r.aread()
+                        print(f"[LLM {r.status_code} BODY {provider.name}]", raw.decode("utf-8", errors="replace"))
+                    r.raise_for_status()
 
-    async with httpx.AsyncClient(timeout=_HF_STREAM_TIMEOUT, limits=_LIMITS, transport=_TRANSPORT) as client:
-        async with client.stream(
-            "POST",
-            f"{HF_BASE_URL}/chat/completions",
-            headers=headers,
-            json=payload,
-        ) as r:
-            if r.status_code == 402:
-                asyncio.create_task(_send_hf_quota_alert())
-            if r.status_code >= 400:
-                raw = await r.aread()
-                print("[HF 400 BODY]", raw.decode("utf-8", errors="replace"))
-            r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data = line[len("data: ") :].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            js = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
 
-            async for line in r.aiter_lines():
-                if not line or not line.startswith("data: "):
-                    continue
-                data = line[len("data: ") :].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    js = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-
-                choices = js.get("choices") or []
-                if not choices:
-                    continue
-                delta = (choices[0].get("delta") or {}).get("content")
-                if not delta:
-                    continue
-                chunk = _clean_text(delta)
-                if chunk:
-                    yield chunk
+                        choices = js.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = (choices[0].get("delta") or {}).get("content")
+                        if not delta:
+                            continue
+                        chunk = _clean_text(delta)
+                        if chunk:
+                            started = True
+                            yield chunk
+            return
+        except (httpx.HTTPStatusError, httpx.TransportError) as e:
+            if started or i == len(providers) - 1 or not _should_fall_back(e):
+                raise
+            print(f"[llm] {provider.name} failed ({type(e).__name__}: {e}); falling back to {providers[i + 1].name}")
 
 
 # ---------------------------------------------------------------------
@@ -1078,7 +1184,7 @@ async def explore_stream(
 
     # 2) efetch + LLM stream
     async with httpx.AsyncClient(
-        timeout=_HF_STREAM_TIMEOUT,
+        timeout=_LLM_STREAM_TIMEOUT,
         limits=_LIMITS,
         transport=_TRANSPORT,
         trust_env=False,

@@ -60,10 +60,23 @@ The app will be available at `http://localhost:8000`.
 Create a `.env` file at the project root with the following variables:
 
 ```env
-# --- LLM ---
+# --- LLM (any OpenAI-compatible chat-completions API) ---
+# Main provider (Mistral free plan)
+LLM_BASE_URL=https://api.mistral.ai/v1
+LLM_API_KEY=
+LLM_MODEL=mistral-small-latest
+# Optional fallback, used when the main provider is rate-limited, out of quota or down
+LLM_FALLBACK_BASE_URL=https://api.groq.com/openai/v1
+LLM_FALLBACK_API_KEY=
+LLM_FALLBACK_MODEL=openai/gpt-oss-20b
+# Legacy: used only when no LLM_* provider is set
 HF_TOKEN=                        # Hugging Face API token
-HF_BASE_URL=https://router.huggingface.co/v1
 HF_MODEL=meta-llama/Llama-3.1-8B-Instruct
+
+# --- Quota alert email (sent once per provider per day on HTTP 402/429) ---
+RESEND_API_KEY=
+EMAIL_FROM=
+ALERT_EMAIL=
 
 # --- Database ---
 TURSO_DATABASE_URL=              # Turso database URL (libsql://...)
