@@ -288,6 +288,31 @@ async def get_plant_verdicts_for_condition(condition: str) -> dict[str, int]:
         return {row[0]: row[1] for row in (rs.rows or [])}
 
 
+async def get_article_verdicts_for_condition(condition: str, pmids: list[str]) -> dict[str, dict[str, int]]:
+    """Return ``{pmid: {plant_name: verdict}}``: each article's own verdict per plant on
+    ``condition`` (codes as in ``plant_article_verdict``), for the given ``pmids``.
+
+    Lets the UI tint every article with its own result, while the card keeps the
+    aggregate from ``plant_condition_verdict``.
+    """
+    condition_key = (condition or "").strip().lower()
+    pmid_keys = sorted({(p or "").strip() for p in pmids if (p or "").strip()})
+    if not condition_key or not pmid_keys:
+        return {}
+    placeholders = ",".join("?" for _ in pmid_keys)
+    _check_cfg()
+    async with create_client(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN) as db:
+        rs = await db.execute(
+            f"SELECT pmid, plant, verdict FROM plant_article_verdict "
+            f"WHERE condition = ? AND pmid IN ({placeholders});",
+            (condition_key, *pmid_keys),
+        )
+    out: dict[str, dict[str, int]] = {}
+    for pmid, plant, verdict in rs.rows or []:
+        out.setdefault(pmid, {})[plant] = verdict
+    return out
+
+
 async def upsert_plant_verdict(condition: str, plant: str, verdict: int) -> None:
     """Persist the aggregated verdict of ``plant`` on ``condition``: positive (0),
     negative/adverse (1), no meaningful effect (2) or irrelevant (3).

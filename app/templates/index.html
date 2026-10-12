@@ -141,6 +141,7 @@
           <p class="card-legend muted"><span class="legend-swatch legend-swatch--mixed"></span>Positive effect for at least one plant</p>
           <p class="card-legend muted"><span class="legend-swatch legend-swatch--none"></span>No effect found — hidden from future searches</p>
           <p class="card-legend muted"><span class="legend-swatch legend-swatch--negative"></span>Negative effect — use with caution</p>
+          <p class="legend-intro legend-note muted">Each checked article is tinted with its own result. The card shows them combined: a negative article outweighs the others, then a positive one.</p>
         </section>
 
         <nav id="yearNav" class="side-card year-nav" aria-label="Jump to year" hidden>
@@ -425,6 +426,14 @@
             }
             text = text.replace(plantStatusRe, '');
 
+            // This article's own per-plant verdicts (PLANT_STATUS is the aggregate).
+            const articleStatusRe = /\n__ARTICLE_STATUS:([^=\n]+)=(POSITIVE|NEGATIVE|NONE|IRRELEVANT)__/g;
+            const articleVerdicts = {};
+            while ((sm = articleStatusRe.exec(text)) !== null) {
+              articleVerdicts[sm[1].trim().toLowerCase()] = sm[2];
+            }
+            text = text.replace(articleStatusRe, '');
+
             // Overall verdict (legacy fallback path, used only when no plant context
             // was available to attribute the verdict to specific plants).
             const verdictMatch = text.match(/\n__VERDICT:(NEGATIVE|POSITIVE)__/);
@@ -450,6 +459,10 @@
               }
 
               applyCardStatusColor(plantCard, currentNames, flags);
+
+              const byName = {};
+              currentNames.forEach(n => { if (articleVerdicts[n.toLowerCase()]) byName[n] = articleVerdicts[n.toLowerCase()]; });
+              applyArticleColor(btnEl.closest('.pmids'), currentNames, byName);
             } else if (verdictMatch && verdictMatch[1] === 'NEGATIVE' && plantCard) {
               markCardNegative(plantCard);
             }
@@ -530,9 +543,32 @@
         plantCard.classList.add(knownBad > 0 ? 'mixed-card' : 'positive-card');
       }
 
+      // An article is tinted with its own result, by the same rules as a card:
+      // red if any plant is negative, grey if none shows an effect, green if every
+      // verified plant is positive, yellow if positive and no-effect plants mix.
+      const ARTICLE_COLOR_CLASSES = ['article-positive', 'article-mixed', 'article-none', 'article-negative'];
+
+      function articleColorClass(names, verdicts) {
+        const known = names.filter(n => verdicts[n]);
+        if (!known.length) return '';
+        if (known.some(n => verdicts[n] === 'NEGATIVE')) return 'article-negative';
+        const positive = known.filter(n => verdicts[n] === 'POSITIVE').length;
+        if (!positive) return 'article-none';
+        const none = known.filter(n => verdicts[n] === 'NONE').length;
+        return none ? 'article-mixed' : 'article-positive';
+      }
+
+      function applyArticleColor(row, names, verdicts) {
+        const cls = articleColorClass(names, verdicts);
+        if (!row || !cls) return;
+        row.classList.remove(...ARTICLE_COLOR_CLASSES);
+        row.classList.add(cls);
+      }
+
       function renderPlantCard(x) {
+        const plantNames = String(x.plant || "").split(',').map(s => s.trim()).filter(Boolean);
         const list = (x.top_studies || []).map(s => `
-          <div class="pmids">
+          <div class="pmids ${articleColorClass(plantNames, s.plant_verdicts || {})}">
             <a target="_blank" href="https://pubmed.ncbi.nlm.nih.gov/${esc(String(s.pmid))}/">
               ${esc(String(s.year || "—"))} – ${esc(String(s.title || ""))}
             </a>
@@ -548,7 +584,6 @@
           </div>
         `).join("");
 
-        const plantNames = String(x.plant || "").split(',').map(s => s.trim()).filter(Boolean);
         const plantFlags = x.plant_flags || {};
         // On a fresh load, a card that's already fully flagged shows the general red
         // badge below — per-plant tags would just repeat the same information. They

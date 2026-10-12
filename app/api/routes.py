@@ -45,6 +45,7 @@ from app.services.turso_db import (
     get_resume_by_pub_id,
     increment_searched,
     insert_resume,
+    get_article_verdicts_for_condition,
     get_plant_verdicts_for_condition,
     upsert_plant_article_verdict,
     get_condition_synonyms,
@@ -1186,6 +1187,23 @@ async def recommendations(
         else:
             r["status_color"] = None
 
+    # Each article's own verdicts, so the UI can tint it separately from the card
+    # (which shows the aggregate: a negative article wins, then a positive one).
+    try:
+        article_verdicts = await get_article_verdicts_for_condition(
+            condition, [s["pmid"] for r in results for s in r["top_studies"]]
+        )
+    except Exception as e:
+        print(f"[turso] article verdict read failed: {type(e).__name__}: {e}")
+        article_verdicts = {}
+    for r in results:
+        names = [n.strip() for n in r["plant"].split(",") if n.strip()]
+        for s in r["top_studies"]:
+            per_plant = article_verdicts.get(str(s["pmid"]), {})
+            s["plant_verdicts"] = {
+                n: _VERDICT_WORDS[per_plant[n.lower()]] for n in names if n.lower() in per_plant
+            }
+
     return {"condition": condition, "search_query": search_query, "results": results}
 
 
@@ -1235,6 +1253,14 @@ async def explore_stream(
                     status = _VERDICT_WORDS.get(verdict_map.get(p.lower()))
                     if status:  # plants never verified get no status
                         yield f"\n__PLANT_STATUS:{p}={status}__"
+                try:
+                    own = (await get_article_verdicts_for_condition(raw_condition, [pmid])).get(pmid, {})
+                except Exception:
+                    own = {}
+                for p in parts_pl:
+                    status = _VERDICT_WORDS.get(own.get(p.lower()))
+                    if status:
+                        yield f"\n__ARTICLE_STATUS:{p}={status}__"
 
         return StreamingResponse(gen_cached(), media_type="text/plain")
 
@@ -1481,6 +1507,11 @@ async def explore_stream(
             status = _VERDICT_WORDS.get(verdict_map.get(p.lower())) or plant_verdicts.get(p.lower())
             if status:
                 yield f"\n__PLANT_STATUS:{p}={status}__"
+        # This article's own verdicts (PLANT_STATUS above is the aggregate over all articles)
+        for p in parts_pl:
+            status = plant_verdicts.get(p.lower())
+            if status:
+                yield f"\n__ARTICLE_STATUS:{p}={status}__"
 
         if clean_resume:
             try:

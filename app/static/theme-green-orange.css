@@ -440,9 +440,9 @@ button.ai-btn:disabled{
   border: 1px solid var(--danger-border);
 }
 .plant-flag-none{
-  color: var(--warning);
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
+  color: var(--no-effect);
+  background: var(--no-effect-bg);
+  border: 1px solid var(--no-effect-border);
 }
 .plant-flag-irrelevant{
   color: var(--text);
@@ -571,6 +571,21 @@ button.ai-btn:disabled{
   border-color: var(--primary);
   background: var(--primary-light);
 }
+/* Article tinted with its own verdict (the card shows the aggregate of all articles) */
+.pmids.article-positive,
+.pmids.article-mixed,
+.pmids.article-none,
+.pmids.article-negative{
+  margin-top: 8px;
+  padding: 2px 10px 10px;
+  border-radius: 8px;
+  border: 1px solid;
+  border-left-width: 3px;
+}
+.pmids.article-positive{ background: var(--success-bg); border-color: var(--success-border); border-left-color: var(--success); }
+.pmids.article-mixed{ background: var(--warning-bg); border-color: var(--warning-border); border-left-color: var(--warning); }
+.pmids.article-none{ background: var(--no-effect-bg); border-color: var(--no-effect-border); border-left-color: var(--no-effect); }
+.pmids.article-negative{ background: var(--danger-bg); border-color: var(--danger-border); border-left-color: var(--danger); }
 .pmids .muted{
   margin-top: -2px;
   color: var(--muted);
@@ -775,6 +790,7 @@ footer{
   font-size: 12px;
   line-height: 1.45;
 }
+.legend-note{ margin: 12px 0 0; }
 .side-title{
   margin: 0 0 10px;
   font-size: 13px;
