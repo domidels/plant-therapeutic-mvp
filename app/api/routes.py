@@ -676,6 +676,50 @@ async def _expand_condition_with_llm(cond: str) -> Tuple[str, List[str], bool]:
 
 MAX_SEARCH_SYNONYMS = 4  # extra terms OR-ed with the corrected condition in PubMed
 
+# Synonyms are OR-ed into the PubMed query, so a term with another scientific meaning
+# pulls in off-topic articles (e.g. "climacteric" also names a type of fruit ripening).
+_AMBIGUOUS_TERM_RULE = (
+    "Also reject any term that has another common meaning in scientific literature outside "
+    "human medicine (botany, agriculture, veterinary science, chemistry, physics, engineering...), "
+    "because searching it would return off-topic articles — e.g. 'climacteric' also describes "
+    "fruit ripening, 'stroke' a swimming or engine stroke.\n"
+)
+
+
+async def _filter_synonyms_with_llm(cond: str, synonyms: List[str]) -> List[str]:
+    """
+    Keep only the LLM-generated synonyms that are safe to OR into the PubMed query for
+    ``cond``: same condition, and no other common scientific meaning. A second, closed-list
+    pass is far stricter than the free generation; answers outside the list are ignored.
+    """
+    if not synonyms:
+        return []
+    listing = "\n".join(f"- {s}" for s in synonyms)
+    system = (
+        "You are a medical terminology assistant helping build a PubMed search.\n"
+        "Given a condition and candidate synonyms, keep ONLY the candidates that name exactly "
+        "the same human condition. Reject broader categories, distinct conditions, and terms "
+        "that are only loosely related.\n"
+        f"{_AMBIGUOUS_TERM_RULE}"
+        "Answer with EXACTLY ONE LINE: KEEP: <term1>, <term2>, ... copied verbatim from the list, "
+        "or KEEP: (none). No other text."
+    )
+    user = f"Condition: {cond}\nCandidates:\n{listing}"
+    raw = await _llm_chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=120,
+        temperature=0.0,
+    )
+    allowed = {normalize_condition(s) for s in synonyms}
+    kept: List[str] = []
+    for line in _clean_text(raw).splitlines():
+        if line.strip().upper().startswith("KEEP:"):
+            for t in line.split(":", 1)[1].split(","):
+                t = normalize_condition(t)
+                if t in allowed and t not in kept:
+                    kept.append(t)
+    return kept
+
 
 async def _select_synonyms_with_llm(cond: str, candidates: List[MeshCandidate]) -> List[str]:
     """
@@ -697,6 +741,7 @@ async def _select_synonyms_with_llm(cond: str, candidates: List[MeshCandidate]) 
         "'anxiety disorders', 'generalized anxiety disorder').\n"
         "Reject distinct diseases, rare genetic syndromes, conditions that merely share a word, "
         "and situational or niche variants that a patient searching this condition would not mean.\n"
+        f"{_AMBIGUOUS_TERM_RULE}"
         "Answer with EXACTLY ONE LINE: KEEP: <term1>, <term2>, ... copied verbatim from the list, "
         "or KEEP: (none). No other text."
     )
@@ -726,7 +771,8 @@ async def resolve_synonyms(cond: str, llm_synonyms: Optional[List[str]] = None) 
     1. Turso cache (``condition_synonyms``) — no LLM, no NCBI call.
     2. MeSH candidates (deterministic) filtered by the LLM from that closed list.
     3. Fallback when MeSH has nothing (lay wording, rare terms): the LLM's own
-       synonyms, from the correction call when available.
+       synonyms, from the correction call when available, then filtered by a
+       second LLM pass that drops ambiguous or loosely related terms.
     The result is cached unless an upstream call failed, so a transient error never
     freezes a degraded synonym list.
     """
@@ -768,6 +814,14 @@ async def resolve_synonyms(cond: str, llm_synonyms: Optional[List[str]] = None) 
                 print(f"[synonyms] LLM fallback failed: {type(e).__name__}: {e}")
                 llm_synonyms, cacheable = [], False
         synonyms = [normalize_condition(x) for x in llm_synonyms if normalize_condition(x) != cond]
+        if synonyms:
+            try:
+                synonyms = await _filter_synonyms_with_llm(cond, synonyms)
+                used_llm = True
+            except Exception as e:
+                # Unfiltered free-generated synonyms are unsafe: search without them, don't cache.
+                print(f"[synonyms] LLM filter failed: {type(e).__name__}: {e}")
+                synonyms, cacheable = [], False
         synonyms = synonyms[:MAX_SEARCH_SYNONYMS]
 
     if cacheable:
@@ -808,6 +862,7 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     is_condition = True
 
     llm_synonyms: Optional[List[str]] = None
+    correction_failed = False
 
     if row and row[0]:
         # Condition already known — cached correction; synonyms resolved below (cache-first)
@@ -823,6 +878,7 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
             traceback.print_exc()
             corrected_norm = raw_norm
             used_llm = False
+            correction_failed = True
 
     # Skip DB writes if input is not a medical condition
     if not is_condition:
@@ -837,11 +893,13 @@ async def resolve_condition_db_first(raw_user_input: str) -> Tuple[str, str, boo
     except Exception as e:
         print(f"[cond-db] upsert condition failed: {type(e).__name__}: {e}")
 
-    # 4) cache mapping
-    try:
-        await db_execute(SQL_UPSERT_MISSPELLING, (raw_norm, corrected_norm))
-    except Exception as e:
-        print(f"[cond-db] upsert misspelling failed: {type(e).__name__}: {e}")
+    # 4) cache mapping — not after a failed LLM call: the uncorrected input would be
+    #    cached as its own correction for good (e.g. "menoposis" → "menoposis").
+    if not correction_failed:
+        try:
+            await db_execute(SQL_UPSERT_MISSPELLING, (raw_norm, corrected_norm))
+        except Exception as e:
+            print(f"[cond-db] upsert misspelling failed: {type(e).__name__}: {e}")
 
     return corrected_norm, corrected_norm, used_llm, synonyms, is_condition
 
