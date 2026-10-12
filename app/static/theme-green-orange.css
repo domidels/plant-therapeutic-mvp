@@ -713,6 +713,16 @@ footer{
   border-radius: 4px;
   flex: none;
 }
+.legend-swatch--unchecked{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+}
+.legend-swatch--negative{
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-left: 3px solid var(--danger);
+}
 .legend-swatch--mixed{
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
@@ -755,6 +765,16 @@ footer{
   padding: 14px 16px;
 }
 .side-card[hidden]{ display: none; }
+/* Legend on white so the card color swatches read as they do on the results */
+#sideLegend{
+  background: var(--surface);
+  border-color: var(--border);
+}
+.legend-intro{
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.45;
+}
 .side-title{
   margin: 0 0 10px;
   font-size: 13px;
