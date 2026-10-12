@@ -485,7 +485,7 @@
         return '<span class="verdict-negative">🛑 Negative effect</span>';
       }
 
-      // kind "negative" → red card; kind "none" → orange card.
+      // kind "negative" → red card; kind "none" → light grey card.
       function markCardNegative(plantCard, kind = 'negative') {
         if (!plantCard) return;
         // Never downgrade a "Negative effect" card to "No effect".

@@ -23,9 +23,9 @@
   --warning: #8a6d1a;
   --warning-bg: #fdf3d9;
   --warning-border: #f0dfa8;
-  --no-effect: #c2620a;        /* orange accent for "No effect" cards */
-  --no-effect-bg: #fdeedd;     /* pale orange for "No effect" cards */
-  --no-effect-border: #f3cfa6;
+  --no-effect: #6b736b;        /* grey accent for "No effect" cards */
+  --no-effect-bg: #eef0ee;     /* light grey for "No effect" cards */
+  --no-effect-border: #d5dad5;
 
   /* Positif confirmé (toutes les plantes) — vert sobre, teinte de l'accent */
   --success: var(--primary-dark);
@@ -383,7 +383,7 @@ button.ai-btn:disabled{
   border-left: 3px solid var(--warning);
 }
 
-/* No effect shown for any listed plant — orange; the card is hidden on the next search */
+/* No effect shown for any listed plant — light grey; the card is hidden on the next search */
 .card.no-effect-card,
 .card.no-effect-card:hover {
   background: var(--no-effect-bg) !important;
@@ -405,7 +405,7 @@ button.ai-btn:disabled{
   font-size: 0.85em;
 }
 .verdict-negative{ margin-left: 4px; }
-/* "No effect" badge: orange exclamation mark instead of the red stop sign */
+/* "No effect" badge: grey exclamation mark instead of the red stop sign */
 .verdict-none{ color: var(--no-effect); }
 .verdict-icon{
   display: inline-flex;
