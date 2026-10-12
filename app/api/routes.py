@@ -1111,8 +1111,9 @@ async def recommendations(
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    # Flag plants previously confirmed (via LLM explanation) to have a negative/adverse
-    # or no meaningful effect on this condition — shown in red with a tag, never hidden.
+    # Plants previously confirmed (via LLM explanation) to have a negative/adverse or no
+    # meaningful effect on this condition: tagged on mixed cards, hidden when the whole
+    # card is made of them (see below).
     try:
         plant_verdicts = await get_plant_verdicts_for_condition(condition)
     except Exception:
@@ -1124,15 +1125,17 @@ async def recommendations(
     # finding, they carry no information worth showing.
     IRRELEVANT_CODE = 3
     NONE_CODE = 2
+    NEGATIVE_CODE = 1
     filtered_results: List[Dict[str, Any]] = []
     for r in results:
         names = [p.strip() for p in r["plant"].split(",") if p.strip()]
         relevant_names = [n for n in names if plant_verdicts.get(n.lower()) != IRRELEVANT_CODE]
         if not relevant_names:
             continue
-        # Plants all confirmed to have no effect (NONE) on this condition are dropped
-        # too: the card would only say "nothing here". Negative ones stay, as a warning.
-        if all(plant_verdicts.get(n.lower()) == NONE_CODE for n in relevant_names):
+        # Cards whose plants were all confirmed to have no effect (NONE) or a negative
+        # effect on this condition are dropped too: none of them is worth suggesting.
+        # Cards mixing such plants with a positive or unverified one stay, tagged.
+        if all(plant_verdicts.get(n.lower()) in (NONE_CODE, NEGATIVE_CODE) for n in relevant_names):
             continue
         r["plant"] = ", ".join(relevant_names)
 
