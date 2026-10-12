@@ -289,8 +289,11 @@ class _LLMProvider:
 
     @property
     def name(self) -> str:
-        """Short label for logs and alerts, e.g. ``api.mistral.ai``."""
-        return urlparse(self.base_url).netloc or self.base_url
+        """Short label for logs and alerts, e.g. ``api.groq.com/openai/gpt-oss-120b``.
+
+        Includes the model: two providers can share a host with separate quotas.
+        """
+        return f"{urlparse(self.base_url).netloc or self.base_url}/{self.model}"
 
 
 def _load_llm_providers() -> List[_LLMProvider]:
